@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(npm*)",
+      "PowerShell(corepack*)",
+      "PowerShell(node*)",
+      "PowerShell(npm install)",
+      "PowerShell(node -v)",
+      "PowerShell(npm -v)",
+      "PowerShell(corepack --version)",
+      "PowerShell(corepack pnpm --version)",
+      "PowerShell(corepack pnpm install)",
+      "PowerShell(corepack pnpm install --ignore-scripts=false)",
+      "PowerShell(corepack pnpm rebuild better-sqlite3 sharp)",
+      "PowerShell(node -e \"require\\('better-sqlite3'\\); require\\('sharp'\\); console.log\\('native deps ok'\\)\")",
+      "PowerShell(node server/app.js)",
+      "PowerShell(try { \\(Invoke-WebRequest -UseBasicParsing http://localhost:3002/api/trips\\).Content } catch { $_.Exception.Message })",
+      "PowerShell(corepack pnpm config set ignored-built-dependencies \"\")",
+      "PowerShell(corepack pnpm rebuild better-sqlite3 sharp --pending)",
+      "PowerShell(corepack pnpm dlx allow-scripts)",
+      "PowerShell(node -e \"const sqlite = require\\('node:sqlite'\\); console.log\\(Object.keys\\(sqlite\\)\\)\")",
+      "PowerShell(try { \\(Invoke-WebRequest -UseBasicParsing http://localhost:3002/\\).StatusCode } catch { $_.Exception.Message })",
+      "PowerShell(try { \\(Invoke-WebRequest -UseBasicParsing http://localhost:3002/vendor/d3/d3.min.js\\).StatusCode } catch { $_.Exception.Message })"
+    ]
+  }
+}
