@@ -1,0 +1,18 @@
+# 依赖目录
+node_modules/
+venv/
+.env
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 日志/缓存
+*.log
+npm-debug.log*
+yarn-debug.log*
+.pnpm-debug.log*
+
+# 构建输出
+dist/
+media/

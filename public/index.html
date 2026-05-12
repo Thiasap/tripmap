@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>旅行地图</title>
+  <link rel="stylesheet" href="/vendor/quill/quill.snow.css">
+  <link rel="stylesheet" href="/vendor/glightbox/css/glightbox.min.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>旅行地图</h1>
+      <p>本地单用户旅行记录</p>
+    </div>
+    <button id="addTripBtn" class="primary">添加</button>
+  </header>
+
+  <main class="workspace">
+    <section id="mapWrap" class="map-wrap">
+      <svg id="mapSvg"></svg>
+      <svg id="linkSvg"></svg>
+      <div id="cardsLayer" class="cards-layer"></div>
+      <div class="map-hint">滚轮缩放，拖动地图平移；卡片可单独拖动。</div>
+    </section>
+  </main>
+
+  <dialog id="tripDialog" class="trip-dialog">
+    <form id="tripForm" method="dialog">
+      <div class="dialog-head">
+        <h2 id="dialogTitle">添加旅行</h2>
+        <div class="dialog-actions">
+          <button type="button" id="editBtn" class="secondary hidden">编辑</button>
+          <button type="button" id="deleteBtn" class="danger hidden">删除</button>
+          <button type="submit" id="saveBtn" class="primary">保存</button>
+          <button type="button" id="closeBtn" class="secondary">关闭</button>
+        </div>
+      </div>
+
+      <input type="hidden" name="id" id="tripId">
+      <div class="form-grid">
+        <label>名称<input name="name" required></label>
+        <label>省份<input name="province" placeholder="例如：云南省"></label>
+        <label>城市<input name="city" placeholder="例如：大理市"></label>
+        <label>详细地址<input name="address_detail"></label>
+        <label>纬度<input name="latitude" type="number" step="any" required></label>
+        <label>经度<input name="longitude" type="number" step="any" required></label>
+        <label>开始日期<input name="start_date" type="date"></label>
+        <label>结束日期<input name="end_date" type="date"></label>
+        <label class="wide">人员<input name="participants" placeholder="用逗号分隔"></label>
+      </div>
+
+      <section class="editor-section">
+        <div class="section-title">
+          <span>富文本描述</span>
+        </div>
+        <div id="richEditor" class="rich-editor"></div>
+      </section>
+
+      <div class="media-editor">
+        <div class="media-row-title">封面：</div>
+        <label class="cover-picker">
+          <input name="cover" type="file" accept="image/*">
+          <span id="coverPreviewText">点击图片上传更换图片</span>
+          <img id="coverPreview" alt="封面预览">
+        </label>
+        <div class="media-row-title">相册：</div>
+        <label class="album-picker">添加照片<input name="album" type="file" accept="image/*" multiple></label>
+        <div id="albumPreview" class="album-grid"></div>
+        <label class="attachment-picker">附件（PDF等）<input name="attachments" type="file" multiple></label>
+      </div>
+
+      <section id="filesPanel" class="files-panel hidden"></section>
+    </form>
+  </dialog>
+
+  <script src="/vendor/d3/d3.min.js"></script>
+  <script src="/vendor/quill/quill.js"></script>
+  <script src="/vendor/glightbox/js/glightbox.min.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
