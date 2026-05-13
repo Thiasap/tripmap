@@ -16,3 +16,5 @@ yarn-debug.log*
 # 构建输出
 dist/
 media/
+tripmap.sqlite*
+.claude/worktrees/
