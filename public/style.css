@@ -50,12 +50,12 @@ button, .upload-inline, .album-picker {
 }
 #linkSvg { pointer-events: none; z-index: 3; }
 .province {
-  stroke: #ffffff;
-  stroke-width: 1;
+  stroke: rgba(255, 255, 255, 0.78);
+  stroke-width: 0.55;
   cursor: grab;
   filter: drop-shadow(0 1px 1px rgba(15, 23, 42, 0.12));
 }
-.province:hover { stroke: #334155; stroke-width: 1.5; }
+.province:hover { stroke: #334155; stroke-width: 0.9; }
 .province-label {
   pointer-events: none;
   text-anchor: middle;
@@ -84,7 +84,7 @@ button, .upload-inline, .album-picker {
   transform-origin: top left;
 }
 .trip-card:active { cursor: grabbing; }
-.trip-card .card-cover { width: 100%; height: auto; object-fit: contain; display: block; background: #f8fafc; user-select: none; pointer-events: none; }
+.trip-card .card-cover { width: 100%; height: auto; display: block; background: #f8fafc; user-select: none; pointer-events: none; }
 .trip-card .no-cover { aspect-ratio: 4 / 3; display: grid; place-items: center; color: #94a3b8; }
 .trip-card.portrait-card .body { padding: 8px 10px 10px; }
 .trip-card .body { padding: 10px 12px 12px; }

@@ -76,13 +76,17 @@ async function initMap() {
     .attr('fill', (d) => stableColor(d.properties.code || d.properties.name));
 
   provinceLabelsGroup = mapGroup.append('g').attr('class', 'province-labels');
+  geojson.features.forEach((feature) => {
+    feature._labelPoint = labelPoint(feature);
+  });
   provinceLabelsGroup.selectAll('text')
     .data(geojson.features)
     .join('text')
     .attr('class', 'province-label')
-    .attr('x', (d) => state.path.centroid(d)[0])
-    .attr('y', (d) => state.path.centroid(d)[1])
+    .attr('x', (d) => d._labelPoint.x)
+    .attr('y', (d) => d._labelPoint.y)
     .text((d) => d.properties.name || d.properties.fullname || '');
+  updateProvinceLabels();
 
   pinsGroup = mapSvg.append('g').attr('class', 'pins-layer');
 
@@ -110,10 +114,86 @@ function projectedPoint(trip) {
   return point ? mapPoint(point) : null;
 }
 
+function labelPoint(feature) {
+  return interiorLabelPoint(feature) || centroidPoint(feature);
+}
+
+function centroidPoint(feature) {
+  const base = state.path.centroid(feature);
+  return { x: base[0], y: base[1] };
+}
+
+function interiorLabelPoint(feature) {
+  const polygons = projectedPolygons(feature).filter((polygon) => polygon[0]?.length >= 3);
+  let best = null;
+  polygons.forEach((polygon) => {
+    const candidate = bestPointInPolygon(polygon);
+    if (candidate && (!best || candidate.distance > best.distance)) best = candidate;
+  });
+  return best ? { x: best.x, y: best.y } : null;
+}
+
+function projectedPolygons(feature) {
+  const geometry = feature.geometry || {};
+  const coordinates = geometry.type === 'Polygon' ? [geometry.coordinates] : geometry.coordinates || [];
+  if (geometry.type !== 'Polygon' && geometry.type !== 'MultiPolygon') return [];
+  return coordinates.map((polygon) => polygon.map((ring) => ring.map((coord) => state.projection(coord)).filter(Boolean)));
+}
+
+function bestPointInPolygon(polygon) {
+  const outer = polygon[0];
+  const bounds = outer.reduce((box, point) => ({
+    minX: Math.min(box.minX, point[0]),
+    minY: Math.min(box.minY, point[1]),
+    maxX: Math.max(box.maxX, point[0]),
+    maxY: Math.max(box.maxY, point[1])
+  }), { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity });
+  let step = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY) / 18;
+  let best = null;
+
+  for (let pass = 0; pass < 5 && step > 0.1; pass += 1) {
+    const startX = best ? best.x - step : bounds.minX;
+    const endX = best ? best.x + step : bounds.maxX;
+    const startY = best ? best.y - step : bounds.minY;
+    const endY = best ? best.y + step : bounds.maxY;
+    for (let x = startX; x <= endX; x += step) {
+      for (let y = startY; y <= endY; y += step) {
+        if (!isPointInPolygonRings([x, y], polygon)) continue;
+        const distance = distanceToPolygonRings([x, y], polygon);
+        if (!best || distance > best.distance) best = { x, y, distance };
+      }
+    }
+    step /= 3;
+  }
+
+  return best;
+}
+
+function isPointInPolygonRings(point, polygon) {
+  return d3.polygonContains(polygon[0], point) && polygon.slice(1).every((ring) => !d3.polygonContains(ring, point));
+}
+
+function distanceToPolygonRings(point, polygon) {
+  return Math.min(...polygon.flatMap((ring) => ring.map((current, index) => {
+    const next = ring[(index + 1) % ring.length];
+    return distanceToSegment(point, current, next);
+  })));
+}
+
+function distanceToSegment(point, start, end) {
+  const dx = end[0] - start[0];
+  const dy = end[1] - start[1];
+  const lengthSquared = dx * dx + dy * dy;
+  const t = lengthSquared ? Math.max(0, Math.min(1, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / lengthSquared)) : 0;
+  const x = start[0] + t * dx;
+  const y = start[1] + t * dy;
+  return Math.hypot(point[0] - x, point[1] - y);
+}
+
 function updateProvinceLabels() {
   provinceLabelsGroup.selectAll('text')
     .attr('transform', (d) => {
-      const [x, y] = state.path.centroid(d);
+      const { x, y } = d._labelPoint;
       return `translate(${x}, ${y}) scale(${1 / state.transform.k}, ${1 / (state.transform.k * 1.18)}) translate(${-x}, ${-y})`;
     });
 }
@@ -130,8 +210,7 @@ function updateCards() {
   state.trips.forEach((trip) => {
     const card = cardsLayer.querySelector(`[data-id="${trip.id}"]`);
     if (!card) return;
-    const coverRatio = coverAspectRatio(trip);
-    const baseWidth = cardWidthForRatio(coverRatio);
+    const baseWidth = cardWidthForTrip(trip);
     const x = state.transform.x + (trip.card_position_x || 40) * state.transform.k;
     const y = state.transform.y + (trip.card_position_y || 90) * state.transform.k * 1.18;
     card.style.width = `${baseWidth}px`;
@@ -159,7 +238,7 @@ function renderTrips() {
     const coverRatio = coverAspectRatio(trip);
     card.classList.toggle('portrait-card', coverRatio < 1);
     card.innerHTML = `
-      ${trip.cover_path ? `<img class="card-cover" style="aspect-ratio:${coverRatio}" src="${trip.cover_path}" alt="${escapeHtml(trip.name)}" draggable="false">` : '<div class="card-cover no-cover">无封面</div>'}
+      ${trip.cover_path ? `<img class="card-cover" src="${trip.cover_path}" alt="${escapeHtml(trip.name)}" draggable="false">` : '<div class="card-cover no-cover">无封面</div>'}
       <div class="body"><strong>${escapeHtml(trip.name || '未命名旅行')}</strong><span>${escapeHtml(dateText(trip))}</span></div>
     `;
     card.addEventListener('click', (event) => {
@@ -194,13 +273,15 @@ function renderLinks() {
     .attr('stroke-width', 1.4);
 }
 
-function cardWidthForRatio(ratio) {
-  return Math.round(Math.max(150, Math.min(360, 220 * ratio)));
+function cardWidthForTrip(trip) {
+  const meta = trip.cover_meta;
+  if (!meta?.width || !meta?.height) return 180;
+  return Math.round(Math.max(120, Math.min(360, meta.width)));
 }
 
 function coverAspectRatio(trip) {
   const meta = trip.cover_meta;
-  if (!meta?.width || !meta?.height) return 4 / 3;
+  if (!meta?.width || !meta?.height) return 1400 / 2097;
   return Math.max(0.55, Math.min(2.6, meta.width / meta.height));
 }
 
