@@ -193,7 +193,7 @@ router.put('/trips/:id', tripFields, async (req, res, next) => {
     if (!existing) return res.status(404).json({ error: 'Trip not found' });
     const saved = await saveUploads(existing.id, req.files);
     const nextTrip = {
-      ...existing,
+      id: existing.id,
       name: req.body.name ?? existing.name,
       province: req.body.province ?? existing.province,
       city: req.body.city ?? existing.city,
