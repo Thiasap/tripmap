@@ -17,7 +17,7 @@ yarn-debug.log*
 dist/
 media/
 media_recycle*/
-tripmap.sqlite*
 .claude/worktrees/
-tripmap.sqlite-shm
-tripmap.sqlite-wal
+/tripmap.sqlite*
+/tripmap.sqlite-shm
+/tripmap.sqlite-wal
