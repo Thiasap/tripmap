@@ -93,14 +93,22 @@ async function loadRegions() {
     map.set(city.parent_code, cities);
     return map;
   }, new Map());
-  provinceOptions.innerHTML = state.regions.provinces.map((province) => `<option value="${escapeHtml(province.name)}"></option>`).join('');
+  provinceOptions.replaceChildren(...state.regions.provinces.map((province) => {
+    const opt = document.createElement('option');
+    opt.value = province.name;
+    return opt;
+  }));
   updateCityOptions();
 }
 
 function updateCityOptions() {
   const province = state.regions.provinces.find((item) => item.name === form.elements.province.value);
   const cities = province ? state.regions.citiesByProvince.get(province.code) || [] : [];
-  cityOptions.innerHTML = cities.map((city) => `<option value="${escapeHtml(city.name)}"></option>`).join('');
+  cityOptions.replaceChildren(...cities.map((city) => {
+    const opt = document.createElement('option');
+    opt.value = city.name;
+    return opt;
+  }));
 }
 
 async function loadSettings() {
