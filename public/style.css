@@ -92,10 +92,10 @@ button, .upload-inline {
 .trip-card:active { cursor: grabbing; }
 .trip-card .card-cover { width: 100%; height: auto; display: block; background: #f8fafc; user-select: none; pointer-events: none; }
 .trip-card .no-cover { aspect-ratio: 4 / 3; display: grid; place-items: center; color: #94a3b8; }
-.trip-card.portrait-card .body { padding: 8px 10px 10px; }
-.trip-card .body { padding: 10px 12px 12px; }
-.trip-card strong { display: block; margin-bottom: 5px; font-size: var(--card-title-font-size, 16px); }
-.trip-card span { color: #64748b; font-size: var(--card-meta-font-size, 13px); }
+.trip-card.portrait-card .body { padding: 0.5em 0.65em 0.6em; }
+.trip-card .body { padding: 0.6em 0.75em 0.7em; }
+.trip-card strong { display: block; margin-bottom: 0.15em; font-size: var(--card-title-font-size, 16px); line-height: 1.2; }
+.trip-card span { color: #64748b; font-size: var(--card-meta-font-size, 13px); line-height: 1.2; }
 .map-hint {
   position: absolute;
   left: 20px;

@@ -19,3 +19,5 @@ media/
 media_recycle*/
 tripmap.sqlite*
 .claude/worktrees/
+tripmap.sqlite-shm
+tripmap.sqlite-wal

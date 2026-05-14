@@ -237,10 +237,10 @@ router.get('/settings', (req, res) => {
 router.put('/settings', (req, res) => {
   const current = getSettings();
   const settings = {
-    card_max_width: clampNumber(req.body.card_max_width, 120, 800, current.card_max_width),
-    card_title_font_size: clampNumber(req.body.card_title_font_size, 10, 40, current.card_title_font_size),
-    card_meta_font_size: clampNumber(req.body.card_meta_font_size, 10, 32, current.card_meta_font_size),
-    card_scale: clampNumber(req.body.card_scale, 0.3, 1, current.card_scale)
+    card_max_width: clampNumber(req.body.card_max_width, 0, 800, current.card_max_width),
+    card_title_font_size: clampNumber(req.body.card_title_font_size, 0, 40, current.card_title_font_size),
+    card_meta_font_size: clampNumber(req.body.card_meta_font_size, 0, 32, current.card_meta_font_size),
+    card_scale: clampNumber(req.body.card_scale, 0.1, 1, current.card_scale)
   };
   saveSettings(settings);
   res.json(settings);
