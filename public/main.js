@@ -4,7 +4,18 @@ const state = {
   editing: true,
   projection: null,
   path: null,
-  transform: d3.zoomIdentity
+  transform: d3.zoomIdentity,
+  settings: {
+    card_max_width: 360,
+    card_title_font_size: 16,
+    card_meta_font_size: 13,
+    card_scale: 1
+  },
+  regions: {
+    provinces: [],
+    citiesByProvince: new Map()
+  },
+  pickingCoordinate: false
 };
 
 const mapSvg = d3.select('#mapSvg');
@@ -21,8 +32,19 @@ const closeBtn = document.querySelector('#closeBtn');
 const coverInput = form.elements.cover;
 const coverPreview = document.querySelector('#coverPreview');
 const coverPreviewText = document.querySelector('#coverPreviewText');
-const albumInput = form.elements.album;
-const albumPreview = document.querySelector('#albumPreview');
+const hiddenAlbumInput = document.querySelector('#hiddenAlbumInput');
+const hiddenAttachmentInput = document.querySelector('#hiddenAttachmentInput');
+let pendingAlbumFiles = [];
+let pendingAttachmentFiles = [];
+const settingsBtn = document.querySelector('#settingsBtn');
+const cardScaleRange = document.querySelector('#cardScaleRange');
+const cardScaleValue = document.querySelector('#cardScaleValue');
+const pickCoordinateBtn = document.querySelector('#pickCoordinateBtn');
+const provinceOptions = document.querySelector('#provinceOptions');
+const cityOptions = document.querySelector('#cityOptions');
+const mapWrap = document.querySelector('#mapWrap');
+const mapHint = document.querySelector('.map-hint');
+const defaultMapHint = mapHint.textContent;
 
 let quill;
 let lightbox;
@@ -43,12 +65,68 @@ function dateText(trip) {
 
 function setFormEnabled(enabled) {
   state.editing = enabled;
-  form.querySelectorAll('input').forEach((input) => {
-    if (input.type !== 'hidden') input.disabled = !enabled;
+  form.querySelectorAll('input, button').forEach((element) => {
+    if (element.type !== 'hidden' && !['editBtn', 'deleteBtn', 'closeBtn'].includes(element.id)) element.disabled = !enabled;
   });
   quill.enable(enabled);
   saveBtn.classList.toggle('hidden', !enabled);
   editBtn.classList.toggle('hidden', enabled || !state.selected);
+}
+
+function showTripDialog() {
+  dialog.classList.remove('hidden');
+}
+
+function hideTripDialog() {
+  dialog.classList.add('hidden');
+}
+
+async function loadRegions() {
+  const res = await fetch('/api/regions');
+  if (!res.ok) throw new Error(await res.text());
+  const payload = await res.json();
+  const regions = payload.data || [];
+  state.regions.provinces = regions.filter((region) => region.level === 1);
+  state.regions.citiesByProvince = regions.filter((region) => region.level === 2).reduce((map, city) => {
+    const cities = map.get(city.parent_code) || [];
+    cities.push(city);
+    map.set(city.parent_code, cities);
+    return map;
+  }, new Map());
+  provinceOptions.innerHTML = state.regions.provinces.map((province) => `<option value="${escapeHtml(province.name)}"></option>`).join('');
+  updateCityOptions();
+}
+
+function updateCityOptions() {
+  const province = state.regions.provinces.find((item) => item.name === form.elements.province.value);
+  const cities = province ? state.regions.citiesByProvince.get(province.code) || [] : [];
+  cityOptions.innerHTML = cities.map((city) => `<option value="${escapeHtml(city.name)}"></option>`).join('');
+}
+
+async function loadSettings() {
+  const res = await fetch('/api/settings');
+  state.settings = { ...state.settings, ...await res.json() };
+  applySettings();
+}
+
+function applySettings() {
+  document.documentElement.style.setProperty('--card-title-font-size', `${state.settings.card_title_font_size}px`);
+  document.documentElement.style.setProperty('--card-meta-font-size', `${state.settings.card_meta_font_size}px`);
+  if (cardScaleRange) cardScaleRange.value = Math.round(state.settings.card_scale * 100);
+  if (cardScaleValue) cardScaleValue.textContent = `${Math.round(state.settings.card_scale * 100)}%`;
+}
+
+async function saveSettings(partial = {}) {
+  state.settings = { ...state.settings, ...partial };
+  applySettings();
+  const res = await fetch('/api/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(state.settings)
+  });
+  if (!res.ok) throw new Error(await res.text());
+  state.settings = await res.json();
+  applySettings();
 }
 
 async function loadTrips() {
@@ -206,6 +284,37 @@ function updatePins() {
     });
 }
 
+function beginCoordinatePick() {
+  if (!state.editing) return;
+  state.pickingCoordinate = true;
+  hideTripDialog();
+  mapWrap.classList.add('picking-coordinate');
+  mapHint.textContent = '点击地图选择经纬度，按 Esc 取消。';
+}
+
+function finishCoordinatePick(event) {
+  if (!state.pickingCoordinate || event.target.closest('.trip-card')) return;
+  const rect = mapWrap.getBoundingClientRect();
+  const point = [
+    (event.clientX - rect.left - state.transform.x) / state.transform.k,
+    (event.clientY - rect.top - state.transform.y) / (state.transform.k * 1.18)
+  ];
+  const coord = state.projection.invert(point);
+  if (coord) {
+    form.elements.longitude.value = coord[0].toFixed(4);
+    form.elements.latitude.value = coord[1].toFixed(4);
+  }
+  cancelCoordinatePick(true);
+}
+
+function cancelCoordinatePick(restoreDialog = false) {
+  if (!state.pickingCoordinate) return;
+  state.pickingCoordinate = false;
+  mapWrap.classList.remove('picking-coordinate');
+  mapHint.textContent = defaultMapHint;
+  if (restoreDialog) showTripDialog();
+}
+
 function updateCards() {
   state.trips.forEach((trip) => {
     const card = cardsLayer.querySelector(`[data-id="${trip.id}"]`);
@@ -275,8 +384,10 @@ function renderLinks() {
 
 function cardWidthForTrip(trip) {
   const meta = trip.cover_meta;
-  if (!meta?.width || !meta?.height) return 180;
-  return Math.round(Math.max(120, Math.min(360, meta.width)));
+  const maxWidth = state.settings.card_max_width * state.settings.card_scale;
+  const minWidth = Math.min(120, maxWidth);
+  if (!meta?.width || !meta?.height) return Math.round(Math.min(180, maxWidth));
+  return Math.round(Math.max(minWidth, Math.min(maxWidth, meta.width * state.settings.card_scale)));
 }
 
 function coverAspectRatio(trip) {
@@ -337,7 +448,7 @@ function openAdd() {
   editBtn.classList.add('hidden');
   deleteBtn.classList.add('hidden');
   setFormEnabled(true);
-  dialog.showModal();
+  showTripDialog();
 }
 
 async function openDetail(id) {
@@ -350,35 +461,142 @@ async function openDetail(id) {
   ['name', 'province', 'city', 'address_detail', 'latitude', 'longitude', 'start_date', 'end_date', 'participants'].forEach((name) => {
     form.elements[name].value = trip[name] || '';
   });
+  updateCityOptions();
   quill.root.innerHTML = trip.rich_text_path || '';
   renderCoverPreview(trip.cover_path, trip.cover_meta);
   deleteBtn.classList.remove('hidden');
-  await renderFiles(id);
   setFormEnabled(false);
-  dialog.showModal();
+  await renderFiles(id);
+  showTripDialog();
 }
 
 async function renderFiles(id) {
   const files = await fetch(`/api/trips/${id}/files`).then((res) => res.json());
   filesPanel.classList.remove('hidden');
   filesPanel.innerHTML = `
-    <div><h3>已上传相册</h3><div class="album-grid">${files.album.map((file) => `<a class="album-tile glightbox" href="${file.url}" data-gallery="trip-album"><img src="${file.thumb}" alt="${escapeHtml(file.name)}"></a>`).join('') || '<span class="empty-text">暂无图片</span>'}</div></div>
-    <div><h3>附件</h3><ul class="file-list">${files.attachments.map((file) => `<li><a href="${file.url}" target="_blank">${escapeHtml(file.name)}</a></li>`).join('') || '<li>暂无附件</li>'}</ul></div>
+    <div>
+      <div class="files-section-head">
+        <h3>已上传相册</h3>
+        ${state.editing ? '<button type="button" class="upload-inline" id="addAlbumBtn">添加照片</button>' : ''}
+      </div>
+      <div class="album-grid">${files.album.map((file, index) => state.editing
+        ? `<div class="album-tile"><a class="glightbox" href="${file.url}" data-index="${index}" data-gallery="trip-album"><img src="${file.thumb}" alt="${escapeHtml(file.name)}"></a><button class="delete-btn" data-type="album" data-name="${escapeHtml(file.name)}">&times;</button></div>`
+        : `<a class="album-tile glightbox" href="${file.url}" data-index="${index}" data-gallery="trip-album"><img src="${file.thumb}" alt="${escapeHtml(file.name)}"></a>`
+      ).join('') || '<span class="empty-text">暂无图片</span>'}</div>
+    </div>
+    <div>
+      <div class="files-section-head">
+        <h3>附件</h3>
+        ${state.editing ? '<button type="button" class="upload-inline" id="addAttachmentBtn">添加附件</button>' : ''}
+      </div>
+      <ul class="file-list">${files.attachments.map((file) => state.editing
+        ? `<li><a href="${file.url}" target="_blank">${escapeHtml(file.name)}</a><button class="delete-btn" data-type="attachments" data-name="${escapeHtml(file.name)}">&times;</button></li>`
+        : `<li><a href="${file.url}" target="_blank">${escapeHtml(file.name)}</a></li>`
+      ).join('') || '<li>暂无附件</li>'}</ul>
+    </div>
   `;
+  setupLightbox(files);
+  if (state.editing) {
+    const addAlbumBtn = filesPanel.querySelector('#addAlbumBtn');
+    const addAttachmentBtn = filesPanel.querySelector('#addAttachmentBtn');
+    if (addAlbumBtn) addAlbumBtn.addEventListener('click', () => hiddenAlbumInput.click());
+    if (addAttachmentBtn) addAttachmentBtn.addEventListener('click', () => hiddenAttachmentInput.click());
+    hiddenAlbumInput.onchange = () => handleAlbumUpload(id);
+    hiddenAttachmentInput.onchange = () => handleAttachmentUpload(id);
+  }
+}
+
+function setupLightbox(files) {
   if (lightbox) lightbox.destroy();
-  lightbox = GLightbox({ selector: '.glightbox' });
+  const elements = files.album.map((file) => ({ href: file.url, type: 'image' }));
+  lightbox = GLightbox({ elements });
+  filesPanel.querySelectorAll('.glightbox').forEach((link) => {
+     link.addEventListener('click', (event) => {
+       event.preventDefault();
+       lightbox.openAt(Number(link.dataset.index) || 0);
+     });
+   });
+}
+
+async function handleAlbumUpload(id) {
+  const files = hiddenAlbumInput.files;
+  if (!files.length) return;
+  if (id) {
+    await uploadFiles(id, 'album', files);
+    hiddenAlbumInput.value = '';
+    await renderFiles(id);
+  } else {
+    pendingAlbumFiles.push(...files);
+    previewPendingAlbum();
+    hiddenAlbumInput.value = '';
+  }
+}
+
+async function handleAttachmentUpload(id) {
+  const files = hiddenAttachmentInput.files;
+  if (!files.length) return;
+  if (id) {
+    await uploadFiles(id, 'attachments', files);
+    hiddenAttachmentInput.value = '';
+    await renderFiles(id);
+  } else {
+    pendingAttachmentFiles.push(...files);
+    previewPendingAttachments();
+    hiddenAttachmentInput.value = '';
+  }
+}
+
+function removePendingAlbum(index) {
+  pendingAlbumFiles.splice(index, 1);
+  previewPendingAlbum();
+}
+
+function removePendingAttachment(index) {
+  pendingAttachmentFiles.splice(index, 1);
+  previewPendingAttachments();
+}
+
+function previewPendingAlbum() {
+  const grid = filesPanel.querySelector('.album-grid');
+  if (grid) {
+    grid.innerHTML = pendingAlbumFiles.map((file, i) => {
+      const url = URL.createObjectURL(file);
+      return `<div class="album-tile"><img src="${url}" alt="${escapeHtml(file.name)}" style="width:100%;height:100%;object-fit:contain;"><button class="delete-btn" data-pending="album" data-index="${i}">&times;</button></div>`;
+    }).join('') || '<span class="empty-text">暂无图片</span>';
+  }
+}
+
+function previewPendingAttachments() {
+  const list = filesPanel.querySelector('.file-list');
+  if (list) {
+    list.innerHTML = pendingAttachmentFiles.map((file, i) => `<li><span>${escapeHtml(file.name)}</span><button class="delete-btn" data-pending="attachments" data-index="${i}">&times;</button></li>`).join('') || '<li>暂无附件</li>';
+  }
+}
+
+async function uploadFiles(id, field, fileList) {
+  const fd = new FormData();
+  for (const file of fileList) fd.append(field, file);
+  const res = await fetch(`/api/trips/${id}/files`, { method: 'POST', body: fd });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+async function deleteFile(id, type, name) {
+  const res = await fetch(`/api/trips/${id}/files?type=${encodeURIComponent(type)}&name=${encodeURIComponent(name)}`, { method: 'DELETE' });
+  if (!res.ok) throw new Error(await res.text());
 }
 
 async function submitForm(event) {
   event.preventDefault();
   const fd = new FormData(form);
   fd.append('rich_text', quill.root.innerHTML);
+  pendingAlbumFiles.forEach((file) => fd.append('album', file));
+  pendingAttachmentFiles.forEach((file) => fd.append('attachments', file));
   const id = form.elements.id.value;
   const url = id ? `/api/trips/${id}` : '/api/trips';
   const method = id ? 'PUT' : 'POST';
   const res = await fetch(url, { method, body: fd });
   if (!res.ok) throw new Error(await res.text());
-  dialog.close();
+  hideTripDialog();
   await loadTrips();
 }
 
@@ -386,7 +604,7 @@ async function deleteSelected() {
   if (!state.selected) return;
   if (!confirm(`删除“${state.selected.name}”？此操作会删除对应媒体文件。`)) return;
   await fetch(`/api/trips/${state.selected.id}`, { method: 'DELETE' });
-  dialog.close();
+  hideTripDialog();
   await loadTrips();
 }
 
@@ -420,23 +638,44 @@ function initEditor() {
 }
 
 function renderCoverPreview(url, meta) {
+  coverPreviewText.textContent = '点击上传或更换图片';
   if (!url) {
     coverPreview.removeAttribute('src');
     coverPreview.style.display = 'none';
     coverPreview.style.aspectRatio = '4 / 3';
-    coverPreviewText.textContent = '点击图片上传更换图片';
     return;
   }
   coverPreview.src = url;
   coverPreview.style.display = 'block';
   coverPreview.style.aspectRatio = `${meta?.width || 4} / ${meta?.height || 3}`;
-  coverPreviewText.textContent = pathFileName(url);
 }
 
 function resetMediaPreviews() {
-  filesPanel.classList.add('hidden');
-  albumPreview.innerHTML = '';
+  pendingAlbumFiles = [];
+  pendingAttachmentFiles = [];
   renderCoverPreview('', null);
+  filesPanel.classList.remove('hidden');
+  filesPanel.innerHTML = `
+    <div>
+      <div class="files-section-head">
+        <h3>已上传相册</h3>
+        <button type="button" class="upload-inline" id="addAlbumBtn">添加照片</button>
+      </div>
+      <div class="album-grid"><span class="empty-text">暂无图片</span></div>
+    </div>
+    <div>
+      <div class="files-section-head">
+        <h3>附件</h3>
+        <button type="button" class="upload-inline" id="addAttachmentBtn">添加附件</button>
+      </div>
+      <ul class="file-list"><li>暂无附件</li></ul>
+    </div>
+  `;
+  filesPanel.querySelector('#addAlbumBtn').addEventListener('click', () => hiddenAlbumInput.click());
+  filesPanel.querySelector('#addAttachmentBtn').addEventListener('click', () => hiddenAttachmentInput.click());
+  hiddenAlbumInput.onchange = () => handleAlbumUpload(null);
+  hiddenAttachmentInput.onchange = () => handleAttachmentUpload(null);
+  if (lightbox) { lightbox.destroy(); lightbox = null; }
 }
 
 function previewCoverFile() {
@@ -446,20 +685,8 @@ function previewCoverFile() {
   const image = new Image();
   image.onload = () => {
     renderCoverPreview(url, { width: image.naturalWidth, height: image.naturalHeight });
-    coverPreviewText.textContent = file.name;
   };
   image.src = url;
-}
-
-function previewAlbumFiles() {
-  albumPreview.innerHTML = Array.from(albumInput.files || []).map((file) => {
-    const url = URL.createObjectURL(file);
-    return `<a class="album-tile" href="${url}" target="_blank"><img src="${url}" alt="${escapeHtml(file.name)}"></a>`;
-  }).join('');
-}
-
-function pathFileName(url) {
-  return decodeURIComponent(String(url).split('/').pop() || '封面.jpg');
 }
 
 function escapeHtml(value) {
@@ -467,16 +694,58 @@ function escapeHtml(value) {
 }
 
 document.querySelector('#addTripBtn').addEventListener('click', openAdd);
+settingsBtn.addEventListener('click', () => { window.location.href = '/settings.html'; });
+pickCoordinateBtn.addEventListener('click', beginCoordinatePick);
+form.elements.province.addEventListener('input', updateCityOptions);
+mapWrap.addEventListener('click', finishCoordinatePick);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') cancelCoordinatePick(true);
+});
+cardScaleRange.addEventListener('input', () => {
+  state.settings.card_scale = Number(cardScaleRange.value) / 100;
+  applySettings();
+  updateCards();
+  renderLinks();
+});
+cardScaleRange.addEventListener('change', () => {
+  saveSettings({ card_scale: Number(cardScaleRange.value) / 100 }).catch((error) => alert(error.message));
+});
 form.addEventListener('submit', submitForm);
-closeBtn.addEventListener('click', () => dialog.close());
-editBtn.addEventListener('click', () => setFormEnabled(true));
+closeBtn.addEventListener('click', hideTripDialog);
+editBtn.addEventListener('click', () => {
+  setFormEnabled(true);
+  if (state.selected) renderFiles(state.selected.id);
+});
 deleteBtn.addEventListener('click', deleteSelected);
 coverInput.addEventListener('change', previewCoverFile);
-albumInput.addEventListener('change', previewAlbumFiles);
+filesPanel.addEventListener('click', async (event) => {
+  const btn = event.target.closest('.delete-btn');
+  if (!btn) return;
+  event.stopPropagation();
+  event.preventDefault();
+  const pending = btn.dataset.pending;
+  if (pending) {
+    const index = Number(btn.dataset.index);
+    if (pending === 'album') removePendingAlbum(index);
+    else if (pending === 'attachments') removePendingAttachment(index);
+    return;
+  }
+  const type = btn.dataset.type;
+  const name = btn.dataset.name;
+  if (type && name && state.selected) {
+    if (!confirm(`确定删除 ${type === 'album' ? '照片' : '附件'} "${name}"？`)) return;
+    try {
+      await deleteFile(state.selected.id, type, name);
+      await renderFiles(state.selected.id);
+    } catch (error) {
+      alert(`删除失败: ${error.message}`);
+    }
+  }
+});
 window.addEventListener('resize', () => location.reload());
 
 initEditor();
-initMap().catch((error) => {
+Promise.all([loadSettings(), loadRegions()]).then(initMap).catch((error) => {
   console.error(error);
   alert('地图加载失败，请检查 china_provinces.geojson。');
 });
