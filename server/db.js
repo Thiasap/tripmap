@@ -30,6 +30,24 @@ sqlite.exec(`
   )
 `);
 
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  )
+`);
+
+const defaultSettings = {
+  card_max_width: '360',
+  card_title_font_size: '16',
+  card_meta_font_size: '13',
+  card_scale: '1'
+};
+
+Object.entries(defaultSettings).forEach(([key, value]) => {
+  sqlite.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)').run(key, value);
+});
+
 const columns = sqlite.prepare('PRAGMA table_info(trips)').all().map((column) => column.name);
 if (!columns.includes('cover_meta')) {
   sqlite.exec('ALTER TABLE trips ADD COLUMN cover_meta TEXT');
@@ -50,15 +68,18 @@ const db = {
     const statement = sqlite.prepare(sql.replace(/@([A-Za-z_][A-Za-z0-9_]*)/g, '$$$1'));
     return {
       get(...params) {
-        const values = params.length > 1 ? params : convertParams(params[0]);
+        const values = params.length === 1 ? convertParams(params[0]) : undefined;
+        if (params.length > 1) return statement.get(...params);
         return values === undefined ? statement.get() : statement.get(values);
       },
       all(...params) {
-        const values = params.length > 1 ? params : convertParams(params[0]);
+        const values = params.length === 1 ? convertParams(params[0]) : undefined;
+        if (params.length > 1) return statement.all(...params);
         return values === undefined ? statement.all() : statement.all(values);
       },
       run(...params) {
-        const values = params.length > 1 ? params : convertParams(params[0]);
+        const values = params.length === 1 ? convertParams(params[0]) : undefined;
+        if (params.length > 1) return statement.run(...params);
         return values === undefined ? statement.run() : statement.run(values);
       }
     };
