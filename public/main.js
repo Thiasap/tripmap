@@ -161,6 +161,7 @@ async function initMap() {
   const geojson = await fetch('china_provinces.geojson').then((res) => res.json());
   const width = document.querySelector('#mapWrap').clientWidth;
   const height = document.querySelector('#mapWrap').clientHeight;
+
   mapSvg.attr('viewBox', `0 0 ${width} ${height}`);
   linkSvg.attr('viewBox', `0 0 ${width} ${height}`);
 
@@ -190,7 +191,7 @@ async function initMap() {
 
   pinsGroup = mapSvg.append('g').attr('class', 'pins-layer');
 
-  mapSvg.call(d3.zoom().scaleExtent([0.7, 8]).on('zoom', (event) => {
+  mapSvg.call(d3.zoom().scaleExtent([0.1, 8]).on('zoom', (event) => {
     state.transform = event.transform;
     mapGroup.attr('transform', `translate(${event.transform.x},${event.transform.y}) scale(${event.transform.k},${event.transform.k * 1.18})`);
     updatePins();
@@ -347,7 +348,7 @@ function updateCards() {
     card.style.width = `${baseWidth}px`;
     card.style.left = `${x}px`;
     card.style.top = `${y}px`;
-    card.style.transform = `scale(${state.transform.k})`;
+    card.style.transform = `scale(${state.transform.k * state.settings.card_scale})`;
   });
 }
 
@@ -406,10 +407,10 @@ function renderLinks() {
 
 function cardWidthForTrip(trip) {
   const meta = trip.cover_meta;
-  const maxWidth = state.settings.card_max_width * state.settings.card_scale;
+  const maxWidth = state.settings.card_max_width;
   const minWidth = Math.min(120, maxWidth);
   if (!meta?.width || !meta?.height) return Math.round(Math.min(180, maxWidth));
-  return Math.round(Math.max(minWidth, Math.min(maxWidth, meta.width * state.settings.card_scale)));
+  return Math.round(Math.max(minWidth, Math.min(maxWidth, meta.width)));
 }
 
 function coverAspectRatio(trip) {
