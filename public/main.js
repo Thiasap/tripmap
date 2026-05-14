@@ -34,6 +34,17 @@ const coverPreview = document.querySelector('#coverPreview');
 const coverPreviewText = document.querySelector('#coverPreviewText');
 const hiddenAlbumInput = document.querySelector('#hiddenAlbumInput');
 const hiddenAttachmentInput = document.querySelector('#hiddenAttachmentInput');
+const participantState = {
+  all: [],
+  selected: [],
+  dropdownVisible: false
+};
+const tagSelector = document.querySelector('#participantTagSelector');
+const tagContainer = tagSelector.querySelector('.tag-selector-container');
+const tagList = tagSelector.querySelector('.tag-list');
+const tagInput = tagSelector.querySelector('.tag-input');
+const tagDropdown = tagSelector.querySelector('.tag-dropdown');
+const participantsHidden = form.elements.participants;
 let pendingAlbumFiles = [];
 let pendingAttachmentFiles = [];
 const settingsBtn = document.querySelector('#settingsBtn');
@@ -71,6 +82,9 @@ function setFormEnabled(enabled) {
   quill.enable(enabled);
   saveBtn.classList.toggle('hidden', !enabled);
   editBtn.classList.toggle('hidden', enabled || !state.selected);
+  tagInput.disabled = !enabled;
+  tagList.querySelectorAll('.tag-remove').forEach((btn) => { btn.style.display = enabled ? '' : 'none'; });
+  if (!enabled) hideTagDropdown();
 }
 
 function showTripDialog() {
@@ -452,6 +466,10 @@ function openAdd() {
   form.reset();
   quill.setContents([]);
   resetMediaPreviews();
+  participantState.selected = [];
+  renderTags();
+  renderDropdown();
+  tagInput.disabled = false;
   document.querySelector('#dialogTitle').textContent = '添加旅行';
   editBtn.classList.add('hidden');
   deleteBtn.classList.add('hidden');
@@ -466,9 +484,20 @@ async function openDetail(id) {
   form.reset();
   document.querySelector('#dialogTitle').textContent = trip.name || '旅行详情';
   form.elements.id.value = trip.id;
-  ['name', 'province', 'city', 'address_detail', 'latitude', 'longitude', 'start_date', 'end_date', 'participants'].forEach((name) => {
+  ['name', 'province', 'city', 'address_detail', 'latitude', 'longitude', 'start_date', 'end_date'].forEach((name) => {
     form.elements[name].value = trip[name] || '';
   });
+  const names = trip.participants ? trip.participants.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  participantState.selected = [...names];
+  names.forEach((name) => {
+    if (!participantState.all.some((p) => p.name === name)) {
+      participantState.all.push({ id: null, name, count: 0, last_participated_at: '' });
+    }
+  });
+  participantState.all.sort((a, b) => b.count - a.count);
+  renderTags();
+  renderDropdown();
+  tagInput.disabled = true;
   updateCityOptions();
   quill.root.innerHTML = trip.rich_text_path || '';
   renderCoverPreview(trip.cover_path, trip.cover_meta);
@@ -604,6 +633,13 @@ async function submitForm(event) {
   const method = id ? 'PUT' : 'POST';
   const res = await fetch(url, { method, body: fd });
   if (!res.ok) throw new Error(await res.text());
+  if (participantState.selected.length) {
+    await fetch('/api/participants/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names: participantState.selected })
+    });
+  }
   hideTripDialog();
   await loadTrips();
 }
@@ -701,6 +737,144 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]));
 }
 
+function syncParticipantHidden() {
+  participantsHidden.value = participantState.selected.join(',');
+}
+
+async function loadParticipants() {
+  try {
+    const res = await fetch('/api/participants');
+    if (res.ok) {
+      const data = await res.json();
+      if (data.length) {
+        participantState.all = data;
+        return;
+      }
+    }
+  } catch { /* use mock */ }
+  const names = ['张三', '李四', '王五', '赵六', '孙七', '周八', '吴九', '郑十', '钱十一', '陈十二'];
+  participantState.all = names.map((name) => ({
+    id: null,
+    name,
+    count: Math.floor(Math.random() * 10) + 1,
+    last_participated_at: new Date(Date.now() - Math.random() * 365 * 24 * 60 * 60 * 1000).toISOString()
+  })).sort((a, b) => b.count - a.count);
+}
+
+function renderTags() {
+  tagList.innerHTML = participantState.selected.map((name) =>
+    `<span class="tag-item">${escapeHtml(name)}<span class="tag-remove" data-name="${escapeHtml(name)}">&times;</span></span>`
+  ).join('');
+  if (!state.editing) {
+    tagList.querySelectorAll('.tag-remove').forEach((btn) => { btn.style.display = 'none'; });
+  }
+  syncParticipantHidden();
+}
+
+function renderDropdown(query = '') {
+  const filter = String(query || '').trim().toLowerCase();
+  const selectedSet = new Set(participantState.selected);
+  const items = participantState.all.filter((p) => {
+    if (selectedSet.has(p.name)) return true;
+    if (!filter) return true;
+    return p.name.toLowerCase().includes(filter);
+  });
+  items.sort((a, b) => {
+    const aSel = selectedSet.has(a.name) ? 1 : 0;
+    const bSel = selectedSet.has(b.name) ? 1 : 0;
+    if (aSel !== bSel) return aSel - bSel;
+    return b.count - a.count;
+  });
+  tagDropdown.innerHTML = items.length
+    ? items.map((p) => {
+        const sel = selectedSet.has(p.name);
+        return `<li class="tag-dropdown-item ${sel ? 'selected' : 'available'}" data-name="${escapeHtml(p.name)}">
+          <span>${escapeHtml(p.name)}</span>
+          <span class="count">参与${p.count}次</span>
+        </li>`;
+      }).join('')
+    : (filter ? '<li class="tag-dropdown-empty">按回车添加「' + escapeHtml(filter) + '」</li>' : '<li class="tag-dropdown-empty">暂无人员数据</li>');
+}
+
+function showTagDropdown() {
+  participantState.dropdownVisible = true;
+  tagDropdown.classList.remove('hidden');
+  renderDropdown(tagInput.value);
+}
+
+function hideTagDropdown() {
+  participantState.dropdownVisible = false;
+  tagDropdown.classList.add('hidden');
+}
+
+function addTag(name) {
+  name = String(name).trim();
+  if (!name || participantState.selected.includes(name)) return;
+  participantState.selected.push(name);
+  if (!participantState.all.some((p) => p.name === name)) {
+    participantState.all.push({ id: null, name, count: 0, last_participated_at: new Date().toISOString() });
+  }
+  renderTags();
+  renderDropdown(tagInput.value);
+  tagInput.value = '';
+}
+
+function removeTag(name) {
+  participantState.selected = participantState.selected.filter((n) => n !== name);
+  renderTags();
+  renderDropdown(tagInput.value);
+}
+
+tagContainer.addEventListener('click', (event) => {
+  if (!state.editing) return;
+  if (event.target.closest('.tag-remove')) {
+    const name = event.target.closest('.tag-remove').dataset.name;
+    if (name) removeTag(name);
+    return;
+  }
+  tagInput.focus();
+  showTagDropdown();
+});
+
+tagInput.addEventListener('input', () => {
+  showTagDropdown();
+});
+
+tagInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    const value = tagInput.value.trim();
+    if (!value) return;
+    const match = participantState.all.find((p) => p.name === value);
+    if (match) {
+      addTag(match.name);
+    } else {
+      addTag(value);
+    }
+  }
+  if (event.key === 'Escape') {
+    hideTagDropdown();
+  }
+});
+
+tagDropdown.addEventListener('mousedown', (event) => {
+  event.preventDefault();
+  const item = event.target.closest('.tag-dropdown-item');
+  if (!item) return;
+  const name = item.dataset.name;
+  if (!name) return;
+  if (participantState.selected.includes(name)) return;
+  addTag(name);
+  hideTagDropdown();
+  tagInput.focus();
+});
+
+document.addEventListener('click', (event) => {
+  if (!tagSelector.contains(event.target)) {
+    hideTagDropdown();
+  }
+});
+
 document.querySelector('#addTripBtn').addEventListener('click', openAdd);
 settingsBtn.addEventListener('click', () => { window.location.href = '/settings.html'; });
 pickCoordinateBtn.addEventListener('click', beginCoordinatePick);
@@ -753,7 +927,7 @@ filesPanel.addEventListener('click', async (event) => {
 window.addEventListener('resize', () => location.reload());
 
 initEditor();
-Promise.all([loadSettings(), loadRegions()]).then(initMap).catch((error) => {
+Promise.all([loadSettings(), loadRegions(), loadParticipants()]).then(initMap).catch((error) => {
   console.error(error);
   alert('地图加载失败，请检查 china_provinces.geojson。');
 });

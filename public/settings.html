@@ -35,6 +35,46 @@
       <button id="cleanupBtn" class="danger" type="button">清理缓存图片</button>
       <pre id="cleanupResult" class="cleanup-result hidden"></pre>
     </section>
+
+    <section class="settings-card">
+      <h2>人员管理</h2>
+      <div class="participant-toolbar">
+        <div class="participant-search">
+          <input type="text" id="participantSearch" placeholder="搜索姓名...">
+          <button id="searchBtn" class="secondary">搜索</button>
+        </div>
+        <div class="participant-controls">
+          <label>每页显示
+            <select id="pageSizeSelect">
+              <option value="5">5</option>
+              <option value="10" selected>10</option>
+              <option value="15">15</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <table class="participant-table">
+        <thead>
+          <tr>
+            <th>姓名</th>
+            <th class="col-date">最近参加时间</th>
+            <th class="col-count">参与次数</th>
+            <th class="col-actions">操作</th>
+          </tr>
+        </thead>
+        <tbody id="participantTableBody"></tbody>
+      </table>
+      <div class="pagination" id="participantPagination"></div>
+      <div class="participant-add-form" id="participantAddForm">
+        <button id="toggleAddBtn" class="add-toggle-btn" type="button">+</button>
+        <span class="add-fields hidden" id="addFields">
+          <input type="text" id="newParticipantName" placeholder="姓名（必填）" required>
+          <input type="datetime-local" id="newParticipantDate">
+          <input type="number" id="newParticipantCount" placeholder="参与次数" min="0" value="0">
+          <button id="addParticipantBtn" class="primary">立即添加</button>
+        </span>
+      </div>
+    </section>
   </main>
 
   <script src="settings.js"></script>

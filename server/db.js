@@ -37,6 +37,15 @@ sqlite.exec(`
   )
 `);
 
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS participants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE,
+    last_participated_at TEXT,
+    count INTEGER DEFAULT 0
+  )
+`);
+
 const defaultSettings = {
   card_max_width: '360',
   card_title_font_size: '16',

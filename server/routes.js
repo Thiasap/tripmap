@@ -423,4 +423,72 @@ router.post('/uploads/richtext', upload.single('image'), (req, res, next) => {
   }
 });
 
+router.get('/participants', (req, res) => {
+  const rows = db.prepare('SELECT * FROM participants ORDER BY count DESC').all();
+  res.json(rows);
+});
+
+router.post('/participants/batch', (req, res, next) => {
+  try {
+    const names = [...new Set((req.body.names || []).map((n) => String(n).trim()).filter(Boolean))];
+    if (!names.length) return res.json({ processed: 0 });
+    const now = new Date().toISOString();
+    const upsert = db.prepare(`
+      INSERT INTO participants (name, last_participated_at, count)
+      VALUES (?, ?, 1)
+      ON CONFLICT(name) DO UPDATE SET
+        last_participated_at = excluded.last_participated_at,
+        count = count + 1
+    `);
+    for (const name of names) {
+      upsert.run(name, now);
+    }
+    res.json({ processed: names.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/participants', (req, res, next) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+    const existing = db.prepare('SELECT id FROM participants WHERE name = ?').get(name);
+    if (existing) return res.status(409).json({ error: 'Participant already exists' });
+    const lastParticipatedAt = req.body.last_participated_at || new Date().toISOString();
+    const count = req.body.count === undefined || req.body.count === '' ? 0 : parseInt(req.body.count);
+    db.prepare('INSERT INTO participants (name, last_participated_at, count) VALUES (?, ?, ?)').run(name, lastParticipatedAt, count);
+    const row = db.prepare('SELECT * FROM participants WHERE rowid = last_insert_rowid()').get();
+    res.status(201).json(row);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/participants/:id', (req, res, next) => {
+  try {
+    const existing = db.prepare('SELECT * FROM participants WHERE id = ?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Not found' });
+    const name = String(req.body.name ?? existing.name).trim();
+    const lastParticipatedAt = req.body.last_participated_at || existing.last_participated_at;
+    const count = req.body.count === undefined || req.body.count === '' ? existing.count : parseInt(req.body.count);
+    db.prepare('UPDATE participants SET name=?, last_participated_at=?, count=? WHERE id=?').run(name, lastParticipatedAt, count, req.params.id);
+    const row = db.prepare('SELECT * FROM participants WHERE id = ?').get(req.params.id);
+    res.json(row);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/participants/:id', (req, res, next) => {
+  try {
+    const existing = db.prepare('SELECT * FROM participants WHERE id = ?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: 'Not found' });
+    db.prepare('DELETE FROM participants WHERE id = ?').run(req.params.id);
+    res.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;

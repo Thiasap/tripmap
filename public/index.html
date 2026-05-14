@@ -59,7 +59,16 @@
           <label class="coordinate-picker-field">地图取点<button type="button" id="pickCoordinateBtn" class="secondary">从地图选择</button></label>
           <label class="wide">开始日期<input name="start_date" type="date"></label>
           <label class="wide">结束日期<input name="end_date" type="date"></label>
-          <label class="wide-row">人员<input name="participants" placeholder="用逗号分隔"></label>
+          <label class="wide-row">人员
+            <div class="tag-selector" id="participantTagSelector">
+              <div class="tag-selector-container" tabindex="0">
+                <span class="tag-list"></span>
+                <input class="tag-input" type="text" placeholder="搜索或输入人员姓名" autocomplete="off">
+              </div>
+              <ul class="tag-dropdown hidden"></ul>
+            </div>
+            <input type="hidden" name="participants">
+          </label>
         </div>
 
         <section class="editor-section">
