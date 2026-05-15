@@ -20,7 +20,8 @@ const settingDefaults = {
   card_max_width: 360,
   card_title_font_size: 16,
   card_meta_font_size: 13,
-  card_scale: 1
+  card_scale: 1,
+  map_stretch: 1
 };
 
 fs.mkdirSync(tempDir, { recursive: true });
@@ -262,7 +263,8 @@ router.put('/settings', requireAdmin, (req, res) => {
     card_max_width: clampNumber(req.body.card_max_width, 0, 800, current.card_max_width),
     card_title_font_size: clampNumber(req.body.card_title_font_size, 0, 40, current.card_title_font_size),
     card_meta_font_size: clampNumber(req.body.card_meta_font_size, 0, 32, current.card_meta_font_size),
-    card_scale: clampNumber(req.body.card_scale, 0.1, 1, current.card_scale)
+    card_scale: clampNumber(req.body.card_scale, 0.1, 1, current.card_scale),
+    map_stretch: clampNumber(req.body.map_stretch, 0.5, 2, current.map_stretch)
   };
   saveSettings(settings);
   res.json(settings);

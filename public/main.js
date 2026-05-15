@@ -16,7 +16,8 @@ const state = {
     citiesByProvince: new Map()
   },
   pickingCoordinate: false,
-  role: 'guest'
+  role: 'guest',
+  mapYRatio: 1
 };
 
 const mapSvg = d3.select('#mapSvg');
@@ -52,6 +53,7 @@ const settingsBtn = document.querySelector('#settingsBtn');
 const cardScaleRange = document.querySelector('#cardScaleRange');
 const cardScaleValue = document.querySelector('#cardScaleValue');
 const pickCoordinateBtn = document.querySelector('#pickCoordinateBtn');
+const autoDetectCoordBtn = document.querySelector('#autoDetectCoordBtn');
 const provinceOptions = document.querySelector('#provinceOptions');
 const cityOptions = document.querySelector('#cityOptions');
 const mapWrap = document.querySelector('#mapWrap');
@@ -151,6 +153,7 @@ function applySettings() {
   document.documentElement.style.setProperty('--card-meta-font-size', `${state.settings.card_meta_font_size}px`);
   if (cardScaleRange) cardScaleRange.value = Math.round(state.settings.card_scale * 100);
   if (cardScaleValue) cardScaleValue.textContent = `${Math.round(state.settings.card_scale * 100)}%`;
+  state.mapYRatio = state.settings.map_stretch || 1;
 }
 
 async function saveSettings(partial = {}) {
@@ -182,7 +185,10 @@ async function initMap() {
 
   state.projection = d3.geoIdentity().reflectY(true).fitExtent([[120, 12], [width - 120, height - 12]], geojson);
   state.path = d3.geoPath(state.projection);
-  mapGroup = mapSvg.append('g').attr('transform', 'scale(1 1.18)');
+
+  state.mapYRatio = state.settings.map_stretch || 1;
+
+  mapGroup = mapSvg.append('g').attr('transform', `scale(1 ${state.mapYRatio})`);
 
   mapGroup.selectAll('path')
     .data(geojson.features)
@@ -208,7 +214,7 @@ async function initMap() {
 
   mapSvg.call(d3.zoom().scaleExtent([0.1, 8]).on('zoom', (event) => {
     state.transform = event.transform;
-    mapGroup.attr('transform', `translate(${event.transform.x},${event.transform.y}) scale(${event.transform.k},${event.transform.k * 1.18})`);
+    mapGroup.attr('transform', `translate(${event.transform.x},${event.transform.y}) scale(${event.transform.k},${event.transform.k * state.mapYRatio})`);
     updatePins();
     updateProvinceLabels();
     updateCards();
@@ -221,7 +227,7 @@ async function initMap() {
 function mapPoint(point) {
   return {
     x: state.transform.x + point[0] * state.transform.k,
-    y: state.transform.y + point[1] * state.transform.k * 1.18
+    y: state.transform.y + point[1] * state.transform.k * state.mapYRatio
   };
 }
 
@@ -310,7 +316,7 @@ function updateProvinceLabels() {
   provinceLabelsGroup.selectAll('text')
     .attr('transform', (d) => {
       const { x, y } = d._labelPoint;
-      return `translate(${x}, ${y}) scale(${1 / state.transform.k}, ${1 / (state.transform.k * 1.18)}) translate(${-x}, ${-y})`;
+      return `translate(${x}, ${y}) scale(${1 / state.transform.k},${1 / (state.transform.k * state.mapYRatio)}) translate(${-x}, ${-y})`;
     });
 }
 
@@ -320,6 +326,27 @@ function updatePins() {
       const point = projectedPoint(d) || { x: 0, y: 0 };
       return `translate(${point.x}, ${point.y})`;
     });
+}
+
+function autoDetectCoord() {
+  const raw = (form.elements.coord_raw.value || '').trim();
+  if (!raw) return;
+  // 支持逗号、空格、中文逗号分隔
+  const parts = raw.split(/[,，\s]+/).map(Number).filter((n) => Number.isFinite(n));
+  if (parts.length < 2) return;
+  const a = parts[0];
+  const b = parts[1];
+  // 中国范围：经度 73.55–135.08，纬度 3.85–53.55
+  const isLng = (v) => v >= 70 && v <= 140;
+  const isLat = (v) => v >= 0 && v <= 60;
+  let lat, lng;
+  if (isLat(a) && isLng(b)) { lat = a; lng = b; }
+  else if (isLng(a) && isLat(b)) { lat = b; lng = a; }
+  else if (isLat(a)) { lat = a; lng = b; }
+  else if (isLng(a)) { lng = a; lat = b; }
+  else { lat = a; lng = b; }
+  form.elements.latitude.value = Number(lat).toFixed(4);
+  form.elements.longitude.value = Number(lng).toFixed(4);
 }
 
 function beginCoordinatePick() {
@@ -335,7 +362,7 @@ function finishCoordinatePick(event) {
   const rect = mapWrap.getBoundingClientRect();
   const point = [
     (event.clientX - rect.left - state.transform.x) / state.transform.k,
-    (event.clientY - rect.top - state.transform.y) / (state.transform.k * 1.18)
+    (event.clientY - rect.top - state.transform.y) / (state.transform.k * state.mapYRatio)
   ];
   const coord = state.projection.invert(point);
   if (coord) {
@@ -359,7 +386,7 @@ function updateCards() {
     if (!card) return;
     const baseWidth = cardWidthForTrip(trip);
     const x = state.transform.x + (trip.card_position_x || 40) * state.transform.k;
-    const y = state.transform.y + (trip.card_position_y || 90) * state.transform.k * 1.18;
+    const y = state.transform.y + (trip.card_position_y || 90) * state.transform.k * state.mapYRatio;
     card.style.width = `${baseWidth}px`;
     card.style.left = `${x}px`;
     card.style.top = `${y}px`;
@@ -446,7 +473,7 @@ function makeCardDraggable(card, trip) {
     startX = event.clientX;
     startY = event.clientY;
     left = ((parseFloat(card.style.left) || 0) - state.transform.x) / state.transform.k;
-    top = ((parseFloat(card.style.top) || 0) - state.transform.y) / (state.transform.k * 1.18);
+    top = ((parseFloat(card.style.top) || 0) - state.transform.y) / (state.transform.k * state.mapYRatio);
     moved = false;
     card.setPointerCapture(event.pointerId);
   });
@@ -455,7 +482,7 @@ function makeCardDraggable(card, trip) {
     event.preventDefault();
     if (!card.hasPointerCapture(event.pointerId)) return;
     const dx = (event.clientX - startX) / state.transform.k;
-    const dy = (event.clientY - startY) / (state.transform.k * 1.18);
+    const dy = (event.clientY - startY) / (state.transform.k);
     if (Math.abs(event.clientX - startX) + Math.abs(event.clientY - startY) > 3) moved = true;
     trip.card_position_x = left + dx;
     trip.card_position_y = top + dy;
@@ -894,6 +921,7 @@ document.addEventListener('click', (event) => {
 document.querySelector('#addTripBtn').addEventListener('click', openAdd);
 settingsBtn.addEventListener('click', () => { window.location.href = '/settings.html'; });
 pickCoordinateBtn.addEventListener('click', beginCoordinatePick);
+autoDetectCoordBtn.addEventListener('click', autoDetectCoord);
 form.elements.province.addEventListener('input', updateCityOptions);
 mapWrap.addEventListener('click', finishCoordinatePick);
 document.addEventListener('keydown', (event) => {

@@ -50,7 +50,8 @@ const defaultSettings = {
   card_max_width: '360',
   card_title_font_size: '16',
   card_meta_font_size: '13',
-  card_scale: '1'
+  card_scale: '1',
+  map_stretch: '1'
 };
 
 Object.entries(defaultSettings).forEach(([key, value]) => {
