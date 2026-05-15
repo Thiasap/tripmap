@@ -384,13 +384,23 @@ function cancelCoordinatePick(restoreDialog = false) {
   if (restoreDialog) showTripDialog();
 }
 
+// 返回卡片在地图坐标系中的像素位置。card_position_x/y 一律视为地理坐标（经度/纬度）。
+function cardPosToPixel(trip) {
+  const x = Number(trip.card_position_x);
+  const y = Number(trip.card_position_y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return [40, 90];
+  const pixel = state.projection([x, y]);
+  return pixel || [40, 90];
+}
+
 function updateCards() {
   state.trips.forEach((trip) => {
     const card = cardsLayer.querySelector(`[data-id="${trip.id}"]`);
     if (!card) return;
     const baseWidth = cardWidthForTrip(trip);
-    const x = state.transform.x + (trip.card_position_x || 40) * state.transform.k;
-    const y = state.transform.y + (trip.card_position_y || 90) * state.transform.k * state.mapYRatio;
+    const [px, py] = cardPosToPixel(trip);
+    const x = state.transform.x + px * state.transform.k;
+    const y = state.transform.y + py * state.transform.k * state.mapYRatio;
     card.style.width = `${baseWidth}px`;
     card.style.left = `${x}px`;
     card.style.top = `${y}px`;
@@ -468,16 +478,21 @@ function coverAspectRatio(trip) {
 function makeCardDraggable(card, trip) {
   let startX = 0;
   let startY = 0;
-  let left = 0;
-  let top = 0;
+  let basePx = 0;   // 拖拽起始像素 X（未缩放地图空间）
+  let basePy = 0;   // 拖拽起始像素 Y
+  let dragPx = 0;   // 当前拖拽像素 X
+  let dragPy = 0;   // 当前拖拽像素 Y
   let moved = false;
 
   card.addEventListener('pointerdown', (event) => {
     event.preventDefault();
     startX = event.clientX;
     startY = event.clientY;
-    left = ((parseFloat(card.style.left) || 0) - state.transform.x) / state.transform.k;
-    top = ((parseFloat(card.style.top) || 0) - state.transform.y) / (state.transform.k * state.mapYRatio);
+    const [px, py] = cardPosToPixel(trip);
+    basePx = px;
+    basePy = py;
+    dragPx = px;
+    dragPy = py;
     moved = false;
     card.setPointerCapture(event.pointerId);
   });
@@ -486,11 +501,15 @@ function makeCardDraggable(card, trip) {
     event.preventDefault();
     if (!card.hasPointerCapture(event.pointerId)) return;
     const dx = (event.clientX - startX) / state.transform.k;
-    const dy = (event.clientY - startY) / (state.transform.k);
+    const dy = (event.clientY - startY) / (state.transform.k * state.mapYRatio);
     if (Math.abs(event.clientX - startX) + Math.abs(event.clientY - startY) > 3) moved = true;
-    trip.card_position_x = left + dx;
-    trip.card_position_y = top + dy;
-    updateCards();
+    dragPx = basePx + dx;
+    dragPy = basePy + dy;
+    // 直接更新被拖动卡片的 DOM，不经过 updateCards，避免触发坐标格式误判
+    const x = state.transform.x + dragPx * state.transform.k;
+    const y = state.transform.y + dragPy * state.transform.k * state.mapYRatio;
+    card.style.left = `${x}px`;
+    card.style.top = `${y}px`;
     renderLinks();
   });
 
@@ -499,12 +518,23 @@ function makeCardDraggable(card, trip) {
     card.releasePointerCapture(event.pointerId);
     card.dataset.dragging = String(moved);
     setTimeout(() => { card.dataset.dragging = 'false'; }, 0);
-    if (moved && state.role === 'admin') {
-      const fd = new FormData();
-      fd.append('card_position_x', trip.card_position_x);
-      fd.append('card_position_y', trip.card_position_y);
-      await fetch(`/api/trips/${trip.id}`, { method: 'PUT', body: fd });
+    if (moved) {
+      // 拖拽结束：像素 → 地理坐标，存入 trip
+      const geo = state.projection.invert([dragPx, dragPy]);
+      if (geo) {
+        trip.card_position_x = geo[0];
+        trip.card_position_y = geo[1];
+      }
+      if (state.role === 'admin') {
+        const fd = new FormData();
+        fd.append('card_position_x', trip.card_position_x);
+        fd.append('card_position_y', trip.card_position_y);
+        await fetch(`/api/trips/${trip.id}`, { method: 'PUT', body: fd });
+      }
     }
+    // 拖拽结束后统一刷新所有卡片（trip 里已是地理坐标，cardPosToPixel 正确投影）
+    updateCards();
+    renderLinks();
   });
 }
 
