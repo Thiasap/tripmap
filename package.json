@@ -12,6 +12,7 @@
     "express-session": "^1.19.0",
     "glightbox": "^3.3.1",
     "helmet": "^8.1.0",
+    "html2canvas": "^1.4.1",
     "multer": "^2.1.1",
     "quill": "^2.0.3",
     "sharp": "^0.34.5"

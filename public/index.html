@@ -19,6 +19,7 @@
         <span id="cardScaleValue">100%</span>
       </label>
       <button id="resetGuestBtn" class="secondary hidden">重置</button>
+      <button id="exportBtn" class="secondary">导出</button>
       <button id="settingsBtn" class="secondary">设置</button>
       <button id="addTripBtn" class="primary">添加</button>
     </div>
@@ -105,10 +106,33 @@
       <input type="file" id="hiddenAttachmentInput" multiple hidden>
     </div>
   </div>
+  <div id="exportDialog" class="trip-overlay hidden">
+    <div class="export-card">
+      <h2>导出地图</h2>
+      <div class="export-options">
+        <label>像素密度 <select id="exportScale">
+          <option value="1">1x（屏幕分辨率）</option>
+          <option value="2" selected>2x（推荐，文字清晰）</option>
+          <option value="3">3x（高清）</option>
+          <option value="4">4x（超高清）</option>
+        </select></label>
+        <label>格式 <select id="exportFormat">
+          <option value="png" selected>PNG</option>
+          <option value="jpeg">JPEG</option>
+        </select></label>
+      </div>
+      <div class="export-actions">
+        <button id="exportDoBtn" class="primary">导出</button>
+        <button id="exportCancelBtn" class="secondary">取消</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/vendor/d3/d3.min.js"></script>
   <script src="/vendor/quill/quill.js"></script>
   <script src="/vendor/glightbox/js/glightbox.min.js"></script>
+  <script src="/vendor/html2canvas/html2canvas.min.js"></script>
   <script src="main.js"></script>
+
 </body>
 </html>

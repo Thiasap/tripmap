@@ -64,6 +64,11 @@ const defaultMapHint = mapHint.textContent;
 
 let quill;
 let lightbox;
+const exportDialog = document.querySelector('#exportDialog');
+const exportScale = document.querySelector('#exportScale');
+const exportFormat = document.querySelector('#exportFormat');
+const exportDoBtn = document.querySelector('#exportDoBtn');
+const exportCancelBtn = document.querySelector('#exportCancelBtn');
 
 let mapGroup;
 let pinsGroup;
@@ -1084,6 +1089,93 @@ filesPanel.addEventListener('click', async (event) => {
   }
 });
 window.addEventListener('resize', () => location.reload());
+
+// 导出地图
+document.querySelector('#exportBtn').addEventListener('click', () => {
+  exportDialog.classList.remove('hidden');
+});
+exportCancelBtn.addEventListener('click', () => {
+  exportDialog.classList.add('hidden');
+});
+exportDoBtn.addEventListener('click', async () => {
+  exportDialog.classList.add('hidden');
+  const scale = Number(exportScale.value) || 2;
+  const format = exportFormat.value === 'jpeg' ? 'image/jpeg' : 'image/png';
+  const mapWrap = document.querySelector('#mapWrap');
+  const origOverflow = mapWrap.style.overflow;
+  mapWrap.style.overflow = 'visible';
+  try {
+    const canvas = await html2canvas(mapWrap, {
+      scale,
+      useCORS: true,
+      allowTaint: true,
+      backgroundColor: null,
+      onclone: (clonedDoc) => {
+        // 在克隆文档中移除卡片 transform 并等比补偿宽高/字号/圆角，避免 html2canvas 扭曲 border-radius
+        const origCards = document.querySelectorAll('.trip-card');
+        const origData = [];
+        origCards.forEach((card) => {
+          const cs = window.getComputedStyle(card);
+          const matrix = new DOMMatrixReadOnly(cs.transform);
+          const body = card.querySelector('.body');
+          const strong = card.querySelector('strong');
+          const span = card.querySelector('.body > span');
+          const bodyCS = body ? window.getComputedStyle(body) : null;
+          origData.push({
+            s: matrix.a || 1,
+            w: parseFloat(card.style.width) || parseFloat(cs.width) || 200,
+            cardFontSize: parseFloat(cs.fontSize) || 16,
+            bodyPad: bodyCS ? [
+              parseFloat(bodyCS.paddingTop),
+              parseFloat(bodyCS.paddingRight),
+              parseFloat(bodyCS.paddingBottom),
+              parseFloat(bodyCS.paddingLeft)
+            ] : [10, 12, 11, 12],
+            titleFontSize: strong ? parseFloat(window.getComputedStyle(strong).fontSize) : 16,
+            metaFontSize: span ? parseFloat(window.getComputedStyle(span).fontSize) : 13
+          });
+        });
+        const clonedCards = clonedDoc.querySelectorAll('.trip-card');
+        clonedCards.forEach((card, i) => {
+          const d = origData[i];
+          if (!d || d.s === 1) return;
+          card.style.transform = '';
+          card.style.transformOrigin = '';
+          card.style.width = (d.w * d.s) + 'px';
+          card.style.minHeight = '0px';
+          card.style.fontSize = (d.cardFontSize * d.s) + 'px';
+          card.style.borderRadius = (16 * d.s) + 'px';
+          const body = card.querySelector('.body');
+          const strong = card.querySelector('strong');
+          const span = card.querySelector('.body > span');
+          if (body) {
+            body.style.padding = d.bodyPad.map((p) => (p * d.s) + 'px').join(' ');
+          }
+          if (strong) {
+            strong.style.fontSize = (d.titleFontSize * d.s) + 'px';
+            strong.style.lineHeight = '1.15';
+            strong.style.marginBottom = '0';
+          }
+          if (span) {
+            span.style.fontSize = (d.metaFontSize * d.s) + 'px';
+            span.style.lineHeight = '1.15';
+          }
+        });
+      }
+    });
+    canvas.toBlob((blob) => {
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.download = `tripmap_${new Date().toISOString().slice(0, 10)}.${format === 'image/jpeg' ? 'jpg' : 'png'}`;
+      link.href = url;
+      link.click();
+      URL.revokeObjectURL(url);
+    }, format, format === 'image/jpeg' ? 0.92 : undefined);
+  } catch (err) {
+    alert('导出失败: ' + err.message);
+  }
+  mapWrap.style.overflow = origOverflow;
+});
 
 initEditor();
 Promise.all([checkAuth(), loadSettings(), loadRegions(), loadParticipants()]).then(initMap).catch((error) => {

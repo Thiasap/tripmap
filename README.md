@@ -45,6 +45,7 @@ npm start
 ## 功能
 
 ### 地图与卡片
+
 - 中国地图展示，省份按编码稳定着色
 - 滚轮缩放、拖动平移地图
 - 旅行卡片浮动于地图上方，图钉通过连线连接卡片
@@ -52,9 +53,10 @@ npm start
 - 卡片封面支持横竖版自适应宽高比
 
 ### 旅行编辑
+
 - 添加 / 编辑 / 删除旅行记录
 - 省份从 `regions_L1_L2.json` 下拉选择，城市根据省份自动筛选
-- 经纬度支持手动输入或从地图点选
+- 经纬度支持手动输入或从地图点选，坐标拾取：[百度地图-坐标拾取器](https://lbs.baidu.com/maptool/getpoint)
 - Quill 富文本编辑器，支持插图
 - 封面上传与预览
 - 相册批量上传（自动生成缩略图）、附件上传
@@ -62,6 +64,7 @@ npm start
 - 新建时支持预上传文件，带删除按钮
 
 ### 人员标签
+
 - Bilibili 风格标签选择器：输入框 + 下拉列表 + 已选标签
 - 下拉按参与次数降序，实时模糊搜索
 - 回车匹配库中人员或新增，点击标签移除
@@ -69,30 +72,31 @@ npm start
 - 设置页人员管理：搜索、分页（5/10/15）、添加、删除
 
 ### 设置页
+
 - 卡片最大宽度、标题字体、小字体、缩放比例可调
 - 媒体缓存清理（移动至 `media_recycle/` 时间戳目录）
 
 ## API
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/trips` | 获取所有旅行 |
-| POST | `/api/trips` | 创建旅行 |
-| PUT | `/api/trips/:id` | 更新旅行 |
-| DELETE | `/api/trips/:id` | 删除旅行及媒体文件 |
-| GET | `/api/trips/:id/files` | 获取旅行的相册/附件列表 |
-| POST | `/api/trips/:id/files` | 追加相册/附件 |
-| DELETE | `/api/trips/:id/files?type=&name=` | 删除单个相册/附件 |
-| GET | `/api/regions` | 获取省市数据 |
-| GET | `/api/settings` | 获取设置 |
-| PUT | `/api/settings` | 更新设置 |
-| POST | `/api/cleanup-media` | 清理孤立媒体文件 |
-| GET | `/api/participants` | 获取人员列表 |
-| POST | `/api/participants` | 添加人员 |
-| PUT | `/api/participants/:id` | 更新人员 |
-| DELETE | `/api/participants/:id` | 删除人员 |
-| POST | `/api/participants/batch` | 批量记录参与（已存在+1次，新人员插入） |
-| POST | `/api/uploads/richtext` | 上传富文本图片 |
+| 方法   | 路径                                 | 说明                                   |
+| ------ | ------------------------------------ | -------------------------------------- |
+| GET    | `/api/trips`                       | 获取所有旅行                           |
+| POST   | `/api/trips`                       | 创建旅行                               |
+| PUT    | `/api/trips/:id`                   | 更新旅行                               |
+| DELETE | `/api/trips/:id`                   | 删除旅行及媒体文件                     |
+| GET    | `/api/trips/:id/files`             | 获取旅行的相册/附件列表                |
+| POST   | `/api/trips/:id/files`             | 追加相册/附件                          |
+| DELETE | `/api/trips/:id/files?type=&name=` | 删除单个相册/附件                      |
+| GET    | `/api/regions`                     | 获取省市数据                           |
+| GET    | `/api/settings`                    | 获取设置                               |
+| PUT    | `/api/settings`                    | 更新设置                               |
+| POST   | `/api/cleanup-media`               | 清理孤立媒体文件                       |
+| GET    | `/api/participants`                | 获取人员列表                           |
+| POST   | `/api/participants`                | 添加人员                               |
+| PUT    | `/api/participants/:id`            | 更新人员                               |
+| DELETE | `/api/participants/:id`            | 删除人员                               |
+| POST   | `/api/participants/batch`          | 批量记录参与（已存在+1次，新人员插入） |
+| POST   | `/api/uploads/richtext`            | 上传富文本图片                         |
 
 ## 数据库
 

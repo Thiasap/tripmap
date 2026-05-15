@@ -40,6 +40,7 @@ app.use('/media', express.static(path.join(rootDir, 'media')));
 app.use('/vendor/d3', express.static(path.join(rootDir, 'node_modules', 'd3', 'dist')));
 app.use('/vendor/quill', express.static(path.join(rootDir, 'node_modules', 'quill', 'dist')));
 app.use('/vendor/glightbox', express.static(path.join(rootDir, 'node_modules', 'glightbox', 'dist')));
+app.use('/vendor/html2canvas', express.static(path.join(rootDir, 'node_modules', 'html2canvas', 'dist')));
 app.use(express.static(path.join(rootDir, 'public')));
 app.use('/api', routes);
 
