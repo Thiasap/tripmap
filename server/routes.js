@@ -21,7 +21,9 @@ const settingDefaults = {
   card_title_font_size: 16,
   card_meta_font_size: 13,
   card_scale: 1,
-  map_stretch: 1
+  map_stretch: 1,
+  pin_size: 7,
+  default_zoom: 1
 };
 
 fs.mkdirSync(tempDir, { recursive: true });
@@ -264,7 +266,9 @@ router.put('/settings', requireAdmin, (req, res) => {
     card_title_font_size: clampNumber(req.body.card_title_font_size, 0, 40, current.card_title_font_size),
     card_meta_font_size: clampNumber(req.body.card_meta_font_size, 0, 32, current.card_meta_font_size),
     card_scale: clampNumber(req.body.card_scale, 0.1, 1, current.card_scale),
-    map_stretch: clampNumber(req.body.map_stretch, 0.5, 2, current.map_stretch)
+    map_stretch: clampNumber(req.body.map_stretch, 0.5, 2, current.map_stretch),
+    pin_size: clampNumber(req.body.pin_size, 2, 30, current.pin_size),
+    default_zoom: clampNumber(req.body.default_zoom, 0.3, 5, current.default_zoom)
   };
   saveSettings(settings);
   res.json(settings);

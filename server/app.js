@@ -49,19 +49,27 @@ function requireAdmin(req, res, next) {
   return res.status(401).json({ error: '需要管理员登录' });
 }
 
-// 登录
+// 登录（重新生成 session ID 防止 session fixation）
 app.post('/api/login', (req, res) => {
-  if (String(req.body.password || '') === ADMIN_PASSWORD) {
-    req.session.isAdmin = true;
-    return res.json({ role: 'admin' });
+  if (String(req.body.password || '') !== ADMIN_PASSWORD) {
+    return res.status(403).json({ error: '密码错误' });
   }
-  return res.status(403).json({ error: '密码错误' });
+  req.session.regenerate((err) => {
+    if (err) return res.status(500).json({ error: '登录失败' });
+    req.session.isAdmin = true;
+    res.json({ role: 'admin' });
+  });
 });
 
-// 登出
+// 登出（服务端销毁 session + 客户端清 cookie）
 app.post('/api/logout', (req, res) => {
-  req.session.destroy(() => {
-    res.clearCookie('connect.sid');
+  const sid = req.sessionID;
+  req.session.destroy((err) => {
+    if (err) {
+      // 即使 destroy 失败，也尝试清掉服务端标记
+      req.session.isAdmin = false;
+    }
+    res.clearCookie('connect.sid', { httpOnly: true, sameSite: 'lax', secure: false });
     res.json({ role: 'guest' });
   });
 });
