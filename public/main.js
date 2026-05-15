@@ -49,6 +49,7 @@ const tagDropdown = tagSelector.querySelector('.tag-dropdown');
 const participantsHidden = form.elements.participants;
 let pendingAlbumFiles = [];
 let pendingAttachmentFiles = [];
+let pendingDeletions = [];
 const settingsBtn = document.querySelector('#settingsBtn');
 const cardScaleRange = document.querySelector('#cardScaleRange');
 const cardScaleValue = document.querySelector('#cardScaleValue');
@@ -96,6 +97,9 @@ function showTripDialog() {
 
 function hideTripDialog() {
   dialog.classList.add('hidden');
+  pendingDeletions = [];
+  pendingAlbumFiles = [];
+  pendingAttachmentFiles = [];
 }
 
 async function loadRegions() {
@@ -507,7 +511,9 @@ function makeCardDraggable(card, trip) {
 function openAdd() {
   state.selected = null;
   form.reset();
+  form.elements.id.value = '';
   quill.setContents([]);
+  pendingDeletions = [];
   resetMediaPreviews();
   participantState.selected = [];
   renderTags();
@@ -550,26 +556,36 @@ async function openDetail(id) {
   showTripDialog();
 }
 
+function isPendingDeletion(type, name) {
+  return pendingDeletions.some((d) => d.type === type && d.name === name);
+}
+
 async function renderFiles(id) {
   const files = await fetch(`/api/trips/${id}/files`).then((res) => res.json());
   filesPanel.classList.remove('hidden');
+  const albumFiles = files.album.filter((f) => !isPendingDeletion('album', f.name));
+  const attachmentFiles = files.attachments.filter((f) => !isPendingDeletion('attachments', f.name));
+  const delBadge = (type) => {
+    const count = pendingDeletions.filter((d) => d.type === type).length;
+    return count ? ` <span class="del-badge">${count} 张待删除</span>` : '';
+  };
   filesPanel.innerHTML = `
     <div>
       <div class="files-section-head">
-        <h3>已上传相册</h3>
+        <h3>已上传相册${delBadge('album')}</h3>
         ${state.editing ? '<button type="button" class="upload-inline" id="addAlbumBtn">添加照片</button>' : ''}
       </div>
-      <div class="album-grid">${files.album.map((file, index) => state.editing
+      <div class="album-grid">${albumFiles.map((file, index) => state.editing
         ? `<div class="album-tile"><a class="glightbox" href="${file.url}" data-index="${index}" data-gallery="trip-album"><img src="${file.thumb}" alt="${escapeHtml(file.name)}"></a><button class="delete-btn" data-type="album" data-name="${escapeHtml(file.name)}">&times;</button></div>`
         : `<a class="album-tile glightbox" href="${file.url}" data-index="${index}" data-gallery="trip-album"><img src="${file.thumb}" alt="${escapeHtml(file.name)}"></a>`
       ).join('') || '<span class="empty-text">暂无图片</span>'}</div>
     </div>
     <div>
       <div class="files-section-head">
-        <h3>附件</h3>
+        <h3>附件${delBadge('attachments')}</h3>
         ${state.editing ? '<button type="button" class="upload-inline" id="addAttachmentBtn">添加附件</button>' : ''}
       </div>
-      <ul class="file-list">${files.attachments.map((file) => state.editing
+      <ul class="file-list">${attachmentFiles.map((file) => state.editing
         ? `<li><a href="${file.url}" target="_blank">${escapeHtml(file.name)}</a><button class="delete-btn" data-type="attachments" data-name="${escapeHtml(file.name)}">&times;</button></li>`
         : `<li><a href="${file.url}" target="_blank">${escapeHtml(file.name)}</a></li>`
       ).join('') || '<li>暂无附件</li>'}</ul>
@@ -683,6 +699,11 @@ async function submitForm(event) {
       body: JSON.stringify({ names: participantState.selected })
     });
   }
+  const savedId = id || (await res.json()).id;
+  for (const del of pendingDeletions) {
+    await deleteFile(savedId, del.type, del.name);
+  }
+  pendingDeletions = [];
   hideTripDialog();
   await loadTrips();
 }
@@ -740,6 +761,7 @@ function renderCoverPreview(url, meta) {
 function resetMediaPreviews() {
   pendingAlbumFiles = [];
   pendingAttachmentFiles = [];
+  pendingDeletions = [];
   renderCoverPreview('', null);
   filesPanel.classList.remove('hidden');
   filesPanel.innerHTML = `
@@ -923,6 +945,19 @@ settingsBtn.addEventListener('click', () => { window.location.href = '/settings.
 pickCoordinateBtn.addEventListener('click', beginCoordinatePick);
 autoDetectCoordBtn.addEventListener('click', autoDetectCoord);
 form.elements.province.addEventListener('input', updateCityOptions);
+form.elements.start_date.addEventListener('change', () => {
+  if (!form.elements.end_date.value) form.elements.end_date.showPicker();
+  swapDatesIfNeeded();
+});
+form.elements.end_date.addEventListener('change', swapDatesIfNeeded);
+function swapDatesIfNeeded() {
+  const start = form.elements.start_date.value;
+  const end = form.elements.end_date.value;
+  if (start && end && start > end) {
+    form.elements.start_date.value = end;
+    form.elements.end_date.value = start;
+  }
+}
 mapWrap.addEventListener('click', finishCoordinatePick);
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') cancelCoordinatePick(true);
@@ -960,13 +995,8 @@ filesPanel.addEventListener('click', async (event) => {
   const type = btn.dataset.type;
   const name = btn.dataset.name;
   if (type && name && state.selected) {
-    if (!confirm(`确定删除 ${type === 'album' ? '照片' : '附件'} "${name}"？`)) return;
-    try {
-      await deleteFile(state.selected.id, type, name);
-      await renderFiles(state.selected.id);
-    } catch (error) {
-      alert(`删除失败: ${error.message}`);
-    }
+    pendingDeletions.push({ type, name });
+    renderFiles(state.selected.id);
   }
 });
 window.addEventListener('resize', () => location.reload());
