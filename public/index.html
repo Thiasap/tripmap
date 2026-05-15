@@ -53,13 +53,23 @@
           <label>省份<input name="province" list="provinceOptions" placeholder="可选择或手动输入"></label>
           <label>城市<input name="city" list="cityOptions" placeholder="可选择或手动输入"></label>
           <label>详细地址<input name="address_detail"></label>
-          <label class="wide">经纬度（逗号分隔，自动识别经纬）<input name="coord_raw" placeholder="例：39.9, 116.4"></label>
-          <label class="coordinate-picker-field" style="align-self:end">识别<button type="button" id="autoDetectCoordBtn" class="secondary">自动识别</button></label>
-          <label>纬度<input name="latitude" type="number" step="any" required></label>
-          <label>经度<input name="longitude" type="number" step="any" required></label>
-          <label class="coordinate-picker-field">地图取点<button type="button" id="pickCoordinateBtn" class="secondary">从地图选择</button></label>
-          <label class="wide">开始日期<input name="start_date" type="date"></label>
-          <label class="wide">结束日期<input name="end_date" type="date"></label>
+          <label class="wide-row">
+            经纬度
+            <span class="coord-inline">
+              <input name="coord_raw" placeholder="例：39.9, 116.4" style="flex:3">
+              <button type="button" id="autoDetectCoordBtn" class="secondary">自动识别</button>
+              <input name="latitude" type="number" step="any" placeholder="纬度" required style="flex:1.2">
+              <input name="longitude" type="number" step="any" placeholder="经度" required style="flex:1.2">
+              <button type="button" id="pickCoordinateBtn" class="secondary">地图取点</button>
+            </span>
+          </label>
+          <label class="wide">日期
+            <span class="date-inline">
+              <input name="start_date" type="date" id="startDate">
+              <span>—</span>
+              <input name="end_date" type="date" id="endDate">
+            </span>
+          </label>
           <label class="wide-row">人员
             <div class="tag-selector" id="participantTagSelector">
               <div class="tag-selector-container" tabindex="0">
