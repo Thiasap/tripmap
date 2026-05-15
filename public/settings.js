@@ -1,3 +1,15 @@
+async function checkSettingsAuth() {
+  try {
+    const res = await fetch('/api/auth/status');
+    const data = await res.json();
+    if (data.role !== 'admin') {
+      window.location.href = '/login.html?redirect=/settings.html';
+    }
+  } catch {
+    window.location.href = '/login.html?redirect=/settings.html';
+  }
+}
+
 const form = document.querySelector('#settingsForm');
 const backBtn = document.querySelector('#backBtn');
 const saveStatus = document.querySelector('#saveStatus');
@@ -201,7 +213,10 @@ participantSearch.addEventListener('keydown', (event) => {
   }
 });
 
-loadParticipants();
+checkSettingsAuth().then(() => {
+  loadParticipants();
+  loadSettings().catch((error) => alert(error.message));
+});
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]));

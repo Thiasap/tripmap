@@ -15,7 +15,8 @@ const state = {
     provinces: [],
     citiesByProvince: new Map()
   },
-  pickingCoordinate: false
+  pickingCoordinate: false,
+  role: 'guest'
 };
 
 const mapSvg = d3.select('#mapSvg');
@@ -123,6 +124,20 @@ function updateCityOptions() {
     opt.value = city.name;
     return opt;
   }));
+}
+
+async function checkAuth() {
+  try {
+    const res = await fetch('/api/auth/status');
+    state.role = (await res.json()).role;
+    applyRole();
+  } catch { state.role = 'guest'; }
+}
+
+function applyRole() {
+  const isGuest = state.role === 'guest';
+  document.querySelector('#addTripBtn').classList.toggle('hidden', isGuest);
+  settingsBtn.onclick = isGuest ? () => { window.location.href = '/login.html?redirect=/settings.html'; } : () => { window.location.href = '/settings.html'; };
 }
 
 async function loadSettings() {
@@ -453,7 +468,7 @@ function makeCardDraggable(card, trip) {
     card.releasePointerCapture(event.pointerId);
     card.dataset.dragging = String(moved);
     setTimeout(() => { card.dataset.dragging = 'false'; }, 0);
-    if (moved) {
+    if (moved && state.role === 'admin') {
       const fd = new FormData();
       fd.append('card_position_x', trip.card_position_x);
       fd.append('card_position_y', trip.card_position_y);
@@ -891,6 +906,7 @@ cardScaleRange.addEventListener('input', () => {
   renderLinks();
 });
 cardScaleRange.addEventListener('change', () => {
+  if (state.role === 'guest') return;
   saveSettings({ card_scale: Number(cardScaleRange.value) / 100 }).catch((error) => alert(error.message));
 });
 form.addEventListener('submit', submitForm);
@@ -928,7 +944,7 @@ filesPanel.addEventListener('click', async (event) => {
 window.addEventListener('resize', () => location.reload());
 
 initEditor();
-Promise.all([loadSettings(), loadRegions(), loadParticipants()]).then(initMap).catch((error) => {
+Promise.all([checkAuth(), loadSettings(), loadRegions(), loadParticipants()]).then(initMap).catch((error) => {
   console.error(error);
   alert('地图加载失败，请检查 china_provinces.geojson。');
 });

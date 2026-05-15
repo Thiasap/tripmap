@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>登录 - 旅行地图</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .login-wrap {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(circle at 30% 20%, #ffffff 0, #e7f0fb 42%, #dbe8f5 100%);
+    }
+    .login-card {
+      background: rgba(255, 255, 255, 0.94);
+      border: 1px solid #d9e2ef;
+      border-radius: 18px;
+      box-shadow: 0 18px 45px rgba(15, 23, 42, 0.12);
+      padding: 32px;
+      width: 360px;
+      max-width: calc(100vw - 48px);
+    }
+    .login-card h1 { margin: 0 0 8px; font-size: 22px; }
+    .login-card p { margin: 0 0 20px; color: #64748b; font-size: 13px; }
+    .login-card label { display: flex; flex-direction: column; gap: 6px; color: #334155; font-size: 13px; font-weight: 700; }
+    .login-card input { border: 1px solid #cbd5e1; border-radius: 10px; padding: 9px 10px; font: inherit; }
+    .login-card button { margin-top: 16px; width: 100%; }
+    .login-error { color: #dc2626; font-size: 13px; margin-top: 8px; display: none; }
+  </style>
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="login-card" id="loginForm">
+      <h1>旅行地图</h1>
+      <p>输入管理员密码以编辑内容</p>
+      <label>密码<input type="password" name="password" required autofocus></label>
+      <button type="submit" class="primary">登录</button>
+      <div class="login-error" id="loginError"></div>
+    </form>
+  </div>
+  <script>
+    const form = document.querySelector('#loginForm');
+    const errorEl = document.querySelector('#loginError');
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: form.elements.password.value })
+      });
+      if (res.ok) {
+        const params = new URLSearchParams(window.location.search);
+        window.location.href = params.get('redirect') || '/';
+      } else {
+        errorEl.textContent = '密码错误';
+        errorEl.style.display = 'block';
+      }
+    });
+  </script>
+</body>
+</html>
