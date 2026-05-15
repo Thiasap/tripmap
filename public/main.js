@@ -50,6 +50,7 @@ const participantsHidden = form.elements.participants;
 let pendingAlbumFiles = [];
 let pendingAttachmentFiles = [];
 let pendingDeletions = [];
+const GUEST_CACHE_KEY = 'tripmap_guest';
 const settingsBtn = document.querySelector('#settingsBtn');
 const cardScaleRange = document.querySelector('#cardScaleRange');
 const cardScaleValue = document.querySelector('#cardScaleValue');
@@ -85,7 +86,7 @@ function setFormEnabled(enabled) {
   });
   quill.enable(enabled);
   saveBtn.classList.toggle('hidden', !enabled);
-  editBtn.classList.toggle('hidden', enabled || !state.selected);
+  editBtn.classList.toggle('hidden', enabled || !state.selected || state.role === 'guest');
   tagInput.disabled = !enabled;
   tagList.querySelectorAll('.tag-remove').forEach((btn) => { btn.style.display = enabled ? '' : 'none'; });
   if (!enabled) hideTagDropdown();
@@ -143,7 +144,44 @@ async function checkAuth() {
 function applyRole() {
   const isGuest = state.role === 'guest';
   document.querySelector('#addTripBtn').classList.toggle('hidden', isGuest);
+  document.querySelector('#resetGuestBtn').classList.toggle('hidden', !isGuest);
   settingsBtn.onclick = isGuest ? () => { window.location.href = '/login.html?redirect=/settings.html'; } : () => { window.location.href = '/settings.html'; };
+}
+
+function loadGuestCache() {
+  if (state.role !== 'guest') return;
+  try {
+    const raw = localStorage.getItem(GUEST_CACHE_KEY);
+    if (!raw) return;
+    const cache = JSON.parse(raw);
+    if (cache.card_scale) {
+      state.settings.card_scale = cache.card_scale;
+      applySettings();
+    }
+    if (cache.positions) {
+      state.trips.forEach((trip) => {
+        const pos = cache.positions[trip.id];
+        if (pos) {
+          trip.card_position_x = pos[0];
+          trip.card_position_y = pos[1];
+        }
+      });
+    }
+  } catch { /* ignore corrupt cache */ }
+}
+
+function saveGuestCache() {
+  if (state.role !== 'guest') return;
+  const cache = { card_scale: state.settings.card_scale, positions: {} };
+  state.trips.forEach((trip) => {
+    cache.positions[trip.id] = [trip.card_position_x, trip.card_position_y];
+  });
+  try { localStorage.setItem(GUEST_CACHE_KEY, JSON.stringify(cache)); } catch { /* quota exceeded */ }
+}
+
+function clearGuestCache() {
+  localStorage.removeItem(GUEST_CACHE_KEY);
+  window.location.reload();
 }
 
 async function loadSettings() {
@@ -176,6 +214,7 @@ async function saveSettings(partial = {}) {
 async function loadTrips() {
   const res = await fetch('/api/trips');
   state.trips = await res.json();
+  loadGuestCache();
   renderTrips();
 }
 
@@ -216,14 +255,21 @@ async function initMap() {
 
   pinsGroup = mapSvg.append('g').attr('class', 'pins-layer');
 
-  mapSvg.call(d3.zoom().scaleExtent([0.1, 8]).on('zoom', (event) => {
+  const zoom = d3.zoom().scaleExtent([0.1, 8]).on('zoom', (event) => {
     state.transform = event.transform;
     mapGroup.attr('transform', `translate(${event.transform.x},${event.transform.y}) scale(${event.transform.k},${event.transform.k * state.mapYRatio})`);
     updatePins();
     updateProvinceLabels();
     updateCards();
     renderLinks();
-  }));
+  });
+  mapSvg.call(zoom);
+
+  // 应用默认缩放
+  const defaultZoom = Number(state.settings.default_zoom) || 1;
+  if (defaultZoom !== 1) {
+    mapSvg.call(zoom.transform, d3.zoomIdentity.scale(defaultZoom));
+  }
 
   await loadTrips();
 }
@@ -325,6 +371,8 @@ function updateProvinceLabels() {
 }
 
 function updatePins() {
+  pinsGroup.selectAll('.pin')
+    .attr('r', state.settings.pin_size || 7);
   pinsGroup.selectAll('.pin-wrap')
     .attr('transform', (d) => {
       const point = projectedPoint(d) || { x: 0, y: 0 };
@@ -413,7 +461,7 @@ function renderTrips() {
     .data(state.trips, (d) => d.id)
     .join((enter) => {
       const group = enter.append('g').attr('class', 'pin-wrap');
-      group.append('circle').attr('class', 'pin').attr('r', 7);
+      group.append('circle').attr('class', 'pin').attr('r', state.settings.pin_size || 7);
       return group;
     });
   updatePins();
@@ -531,6 +579,7 @@ function makeCardDraggable(card, trip) {
         fd.append('card_position_y', trip.card_position_y);
         await fetch(`/api/trips/${trip.id}`, { method: 'PUT', body: fd });
       }
+      if (state.role === 'guest') saveGuestCache();
     }
     // 拖拽结束后统一刷新所有卡片（trip 里已是地理坐标，cardPosToPixel 正确投影）
     updateCards();
@@ -580,7 +629,7 @@ async function openDetail(id) {
   updateCityOptions();
   quill.root.innerHTML = trip.rich_text_path || '';
   renderCoverPreview(trip.cover_path, trip.cover_meta);
-  deleteBtn.classList.remove('hidden');
+  if (state.role !== 'guest') deleteBtn.classList.remove('hidden');
   setFormEnabled(false);
   await renderFiles(id);
   showTripDialog();
@@ -971,6 +1020,9 @@ document.addEventListener('click', (event) => {
 });
 
 document.querySelector('#addTripBtn').addEventListener('click', openAdd);
+document.querySelector('#resetGuestBtn').addEventListener('click', () => {
+  if (confirm('重置将清空所有本地缓存的卡片位置和缩放设置，确定？')) clearGuestCache();
+});
 settingsBtn.addEventListener('click', () => { window.location.href = '/settings.html'; });
 pickCoordinateBtn.addEventListener('click', beginCoordinatePick);
 autoDetectCoordBtn.addEventListener('click', autoDetectCoord);
@@ -999,7 +1051,7 @@ cardScaleRange.addEventListener('input', () => {
   renderLinks();
 });
 cardScaleRange.addEventListener('change', () => {
-  if (state.role === 'guest') return;
+  if (state.role === 'guest') { saveGuestCache(); return; }
   saveSettings({ card_scale: Number(cardScaleRange.value) / 100 }).catch((error) => alert(error.message));
 });
 form.addEventListener('submit', submitForm);

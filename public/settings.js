@@ -12,6 +12,7 @@ async function checkSettingsAuth() {
 
 const form = document.querySelector('#settingsForm');
 const backBtn = document.querySelector('#backBtn');
+const logoutBtn = document.querySelector('#logoutBtn');
 const saveStatus = document.querySelector('#saveStatus');
 const cleanupBtn = document.querySelector('#cleanupBtn');
 const cleanupResult = document.querySelector('#cleanupResult');
@@ -56,6 +57,10 @@ async function cleanupMedia() {
 }
 
 backBtn.addEventListener('click', () => { window.location.href = '/'; });
+logoutBtn.addEventListener('click', async () => {
+  await fetch('/api/logout', { method: 'POST' });
+  window.location.href = '/';
+});
 form.addEventListener('submit', (event) => saveSettings(event).catch((error) => alert(error.message)));
 cleanupBtn.addEventListener('click', cleanupMedia);
 loadSettings().catch((error) => alert(error.message));
