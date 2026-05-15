@@ -152,6 +152,24 @@ button, .upload-inline {
 .rich-editor .ql-editor::-webkit-scrollbar-thumb:hover,
 .cleanup-result::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
 .glightbox-container { z-index: 2147483647 !important; }
+.export-card {
+  background: white;
+  border-radius: 18px;
+  padding: 28px;
+  width: 380px;
+  max-width: calc(100vw - 48px);
+  box-shadow: 0 30px 80px rgba(15, 23, 42, 0.3);
+}
+.export-card h2 { margin: 0 0 18px; font-size: 18px; }
+.export-options { display: flex; flex-direction: column; gap: 14px; margin-bottom: 20px; }
+.export-options label { flex-direction: row; align-items: center; gap: 10px; }
+.export-options select {
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font: inherit;
+}
+.export-actions { display: flex; gap: 10px; justify-content: flex-end; }
 #tripForm { padding: 22px; }
 .dialog-head { display: flex; justify-content: space-between; gap: 20px; align-items: center; margin-bottom: 18px; }
 .dialog-head h2 { margin: 0; color: #0f172a; font-size: 18px; font-weight: 700; }
