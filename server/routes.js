@@ -325,8 +325,8 @@ router.post('/trips', requireAdmin, tripFields, async (req, res, next) => {
       attachments_path: saved.attachments_path,
       cover_path: saved.cover_path || '',
       cover_meta: saved.cover_meta ? JSON.stringify(saved.cover_meta) : '',
-      card_position_x: Number(req.body.card_position_x) || 40,
-      card_position_y: Number(req.body.card_position_y) || 90,
+      card_position_x: Number(req.body.card_position_x) || 104,
+      card_position_y: Number(req.body.card_position_y) || 35,
       created_at: now,
       updated_at: now
     };
