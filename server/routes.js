@@ -6,6 +6,11 @@ const sharp = require('sharp');
 const db = require('./db');
 
 const router = express.Router();
+
+function requireAdmin(req, res, next) {
+  if (req.session && req.session.isAdmin) return next();
+  return res.status(401).json({ error: '需要管理员登录' });
+}
 const rootDir = path.join(__dirname, '..');
 const mediaDir = path.join(rootDir, 'media');
 const recycleDir = path.join(rootDir, 'media_recycle');
@@ -20,7 +25,24 @@ const settingDefaults = {
 
 fs.mkdirSync(tempDir, { recursive: true });
 
-const upload = multer({ dest: tempDir });
+const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+const SAFE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf', '.mp4', '.mov', '.txt']);
+const MB = 1024 * 1024;
+
+function fileFilter(req, file, cb) {
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (!SAFE_EXT.has(ext)) return cb(new Error(`不支持的文件类型: ${ext}`));
+  if (file.fieldname !== 'attachments' && !IMAGE_MIMES.has(file.mimetype)) {
+    return cb(new Error(`仅支持图片格式: ${file.mimetype}`));
+  }
+  cb(null, true);
+}
+
+const upload = multer({
+  dest: tempDir,
+  fileFilter,
+  limits: { fileSize: 200 * MB }
+});
 const tripFields = upload.fields([
   { name: 'cover', maxCount: 1 },
   { name: 'album', maxCount: 100 },
@@ -234,7 +256,7 @@ router.get('/settings', (req, res) => {
   res.json(getSettings());
 });
 
-router.put('/settings', (req, res) => {
+router.put('/settings', requireAdmin, (req, res) => {
   const current = getSettings();
   const settings = {
     card_max_width: clampNumber(req.body.card_max_width, 0, 800, current.card_max_width),
@@ -246,7 +268,7 @@ router.put('/settings', (req, res) => {
   res.json(settings);
 });
 
-router.post('/cleanup-media', (req, res, next) => {
+router.post('/cleanup-media', requireAdmin, (req, res, next) => {
   try {
     res.json(cleanupMediaFiles());
   } catch (error) {
@@ -280,7 +302,7 @@ router.get('/trips/:id/files', (req, res) => {
   });
 });
 
-router.post('/trips', tripFields, async (req, res, next) => {
+router.post('/trips', requireAdmin, tripFields, async (req, res, next) => {
   try {
     const now = new Date().toISOString();
     const id = makeTripId(req.body.province, req.body.city);
@@ -317,7 +339,7 @@ router.post('/trips', tripFields, async (req, res, next) => {
   }
 });
 
-router.put('/trips/:id', tripFields, async (req, res, next) => {
+router.put('/trips/:id', requireAdmin, tripFields, async (req, res, next) => {
   try {
     const existing = db.prepare('SELECT * FROM trips WHERE id = ?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Trip not found' });
@@ -353,7 +375,7 @@ router.put('/trips/:id', tripFields, async (req, res, next) => {
   }
 });
 
-router.delete('/trips/:id/files', (req, res, next) => {
+router.delete('/trips/:id/files', requireAdmin, (req, res, next) => {
   try {
     const existing = db.prepare('SELECT id FROM trips WHERE id = ?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Trip not found' });
@@ -373,7 +395,7 @@ router.delete('/trips/:id/files', (req, res, next) => {
   }
 });
 
-router.delete('/trips/:id', (req, res, next) => {
+router.delete('/trips/:id', requireAdmin, (req, res, next) => {
   try {
     const existing = db.prepare('SELECT * FROM trips WHERE id = ?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Trip not found' });
@@ -386,7 +408,7 @@ router.delete('/trips/:id', (req, res, next) => {
   }
 });
 
-router.post('/trips/:id/files', upload.fields([{ name: 'album', maxCount: 100 }, { name: 'attachments', maxCount: 100 }]), async (req, res, next) => {
+router.post('/trips/:id/files', requireAdmin, upload.fields([{ name: 'album', maxCount: 100 }, { name: 'attachments', maxCount: 100 }]), async (req, res, next) => {
   try {
     const existing = db.prepare('SELECT id, album_path, attachments_path FROM trips WHERE id = ?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Trip not found' });
@@ -409,7 +431,7 @@ router.post('/trips/:id/files', upload.fields([{ name: 'album', maxCount: 100 },
   }
 });
 
-router.post('/uploads/richtext', upload.single('image'), (req, res, next) => {
+router.post('/uploads/richtext', requireAdmin, upload.single('image'), (req, res, next) => {
   try {
     const id = req.body.id || 'draft';
     const dir = path.join(mediaDir, 'richtext_images', safeName(id));
@@ -428,7 +450,7 @@ router.get('/participants', (req, res) => {
   res.json(rows);
 });
 
-router.post('/participants/batch', (req, res, next) => {
+router.post('/participants/batch', requireAdmin, (req, res, next) => {
   try {
     const names = [...new Set((req.body.names || []).map((n) => String(n).trim()).filter(Boolean))];
     if (!names.length) return res.json({ processed: 0 });
@@ -449,7 +471,7 @@ router.post('/participants/batch', (req, res, next) => {
   }
 });
 
-router.post('/participants', (req, res, next) => {
+router.post('/participants', requireAdmin, (req, res, next) => {
   try {
     const name = String(req.body.name || '').trim();
     if (!name) return res.status(400).json({ error: 'Name is required' });
@@ -465,7 +487,7 @@ router.post('/participants', (req, res, next) => {
   }
 });
 
-router.put('/participants/:id', (req, res, next) => {
+router.put('/participants/:id', requireAdmin, (req, res, next) => {
   try {
     const existing = db.prepare('SELECT * FROM participants WHERE id = ?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Not found' });
@@ -480,7 +502,7 @@ router.put('/participants/:id', (req, res, next) => {
   }
 });
 
-router.delete('/participants/:id', (req, res, next) => {
+router.delete('/participants/:id', requireAdmin, (req, res, next) => {
   try {
     const existing = db.prepare('SELECT * FROM participants WHERE id = ?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Not found' });
