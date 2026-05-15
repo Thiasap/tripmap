@@ -442,6 +442,8 @@ function cardPosToPixel(trip) {
 }
 
 function updateCards() {
+  // 视口缩放因子：卡片随窗口大小等比缩放（1920px 基准，钳制 0.4-2.5）
+  const viewScale = Math.max(0.4, Math.min(mapWrap.clientWidth / 1920, 2.5));
   state.trips.forEach((trip) => {
     const card = cardsLayer.querySelector(`[data-id="${trip.id}"]`);
     if (!card) return;
@@ -452,7 +454,7 @@ function updateCards() {
     card.style.width = `${baseWidth}px`;
     card.style.left = `${x}px`;
     card.style.top = `${y}px`;
-    card.style.transform = `scale(${state.transform.k * state.settings.card_scale})`;
+    card.style.transform = `scale(${state.transform.k * state.settings.card_scale * viewScale})`;
   });
 }
 
