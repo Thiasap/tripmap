@@ -80,9 +80,12 @@ app.get('/api/auth/status', (req, res) => {
   res.json({ role: req.session && req.session.isAdmin ? 'admin' : 'guest' });
 });
 
-// 统一错误处理
+// 统一错误处理（multer 错误和其他内部错误均返回 JSON）
 app.use((err, req, res, next) => {
   console.error(err);
+  if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: '文件大小超出限制（最大 200MB）' });
+  if (err.code === 'LIMIT_FIELD_SIZE') return res.status(413).json({ error: '字段内容过长（最大 100KB）' });
+  if (err.name === 'MulterError' || err.code) return res.status(400).json({ error: err.message });
   const status = err.status || err.statusCode || 500;
   const message = status === 500 ? '服务器内部错误' : (err.message || 'Server error');
   res.status(status).json({ error: message });

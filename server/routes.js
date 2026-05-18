@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const sharp = require('sharp');
+const sanitizeHtml = require('sanitize-html');
 const db = require('./db');
 
 const router = express.Router();
@@ -44,7 +45,7 @@ function fileFilter(req, file, cb) {
 const upload = multer({
   dest: tempDir,
   fileFilter,
-  limits: { fileSize: 200 * MB }
+  limits: { fileSize: 200 * MB, fieldSize: 100 * 1024 }
 });
 const tripFields = upload.fields([
   { name: 'cover', maxCount: 1 },
@@ -169,6 +170,16 @@ function clampNumber(value, min, max, fallback) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, number));
+}
+
+const richTextAllowed = {
+  allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img', 'h1', 'h2', 'u', 's']),
+  allowedAttributes: { ...sanitizeHtml.defaults.allowedAttributes, img: ['src', 'alt'] },
+  allowedSchemes: ['http', 'https']
+};
+function sanitizeRichText(html) {
+  if (!html || typeof html !== 'string') return '';
+  return sanitizeHtml(html, richTextAllowed);
 }
 
 function roundCoordinate(value) {
@@ -324,7 +335,7 @@ router.post('/trips', requireAdmin, tripFields, async (req, res, next) => {
       start_date: req.body.start_date || '',
       end_date: req.body.end_date || '',
       participants: req.body.participants || '',
-      rich_text_path: req.body.rich_text || '',
+      rich_text_path: sanitizeRichText(req.body.rich_text),
       album_path: saved.album_path,
       attachments_path: saved.attachments_path,
       cover_path: saved.cover_path || '',
@@ -361,7 +372,7 @@ router.put('/trips/:id', requireAdmin, tripFields, async (req, res, next) => {
       start_date: req.body.start_date ?? existing.start_date,
       end_date: req.body.end_date ?? existing.end_date,
       participants: req.body.participants ?? existing.participants,
-      rich_text_path: req.body.rich_text ?? existing.rich_text_path,
+      rich_text_path: req.body.rich_text !== undefined ? sanitizeRichText(req.body.rich_text) : existing.rich_text_path,
       album_path: saved.album_path || existing.album_path,
       attachments_path: saved.attachments_path || existing.attachments_path,
       cover_path: saved.cover_path || existing.cover_path,
