@@ -8,6 +8,7 @@
 
 | 层级     | 技术                                       |
 | -------- | ------------------------------------------ |
+| 运行环境 | Node.js ≥ 22.5（使用内置 node:sqlite）    |
 | 后端     | Node.js + Express                          |
 | 数据库   | SQLite（node:sqlite，WAL 模式）            |
 | 地图     | D3.js + GeoJSON（`d3.geoIdentity` 投影） |
@@ -28,8 +29,10 @@ public/
   index.html                  # 主页面
   login.html                  # 管理员登录页
   settings.html               # 设置页面
+  common.js                   # 共享工具（escapeHtml 等）
   main.js                     # 主页面逻辑
   settings.js                 # 设置页面逻辑
+  login.js                    # 登录页逻辑
   style.css                   # 样式
   china_provinces.geojson     # 中国地图 GeoJSON 数据
 server/
@@ -61,7 +64,29 @@ node server/app.js
 }
 ```
 
-修改密码后重启服务生效。环境变量 `ADMIN_PASSWORD` / `SESSION_SECRET` 优先级更高。
+修改密码后重启服务生效。环境变量优先级高于 `config.json`：
+
+| 环境变量         | 默认值     | 说明                                                     |
+| ---------------- | ---------- | -------------------------------------------------------- |
+| `ADMIN_PASSWORD` | `admin`    | 管理员密码（默认值仅作本地首次启动引导，对外部署前必改） |
+| `SESSION_SECRET` | 随机       | Session 密钥，公网部署应固定为随机长串                   |
+| `HOST`           | `127.0.0.1` | 监听地址，公网部署设 `0.0.0.0`（推荐仍由本机反代转发）   |
+| `COOKIE_SECURE`  | `false`    | HTTPS 部署时设 `true` 开启 Secure Cookie                 |
+| `TRUST_PROXY`    | —          | 反向代理之后设为代理跳数（如 `1`），限速按真实 IP 计数   |
+
+## 公网部署
+
+应用默认按「本地单人使用」设计（监听 127.0.0.1、HTTP Cookie、内存 Session）。部署到互联网前请逐项确认：
+
+1. **修改密码**：`ADMIN_PASSWORD` 使用强密码，禁止保留默认值
+2. **固定 Session 密钥**：设置 `SESSION_SECRET` 环境变量，否则重启后所有登录态失效
+3. **HTTPS**：前置 Nginx/Caddy 等反向代理提供 TLS，并设置 `COOKIE_SECURE=true`
+4. **监听地址**：推荐保持默认 `127.0.0.1`，由同机反代对外转发；若需直连则 `HOST=0.0.0.0`
+5. **反向代理**：设置 `TRUST_PROXY=1`，登录限速才能按真实客户端 IP 计数
+6. **会话存储**：单用户场景 MemoryStore 足够；多用户/长期运行建议换持久化 store（如 connect-sqlite3）
+7. **备份**：`tripmap.sqlite*` 与 `media/` 纳入备份计划；`media_recycle/` 为删除缓冲区，可定期人工清理
+
+各项设计的原因见 `server/app.js` 头部「安全设计说明」注释。
 
 ## 鉴权
 
@@ -75,6 +100,7 @@ node server/app.js
 - 后端所有写 API 默认要求 `requireAdmin`，未登录返回 401
 - Session 基于 `express-session` + httpOnly Cookie + `sameSite: lax`
 - 登录时重新生成 Session ID（防 Session Fixation），登出时服务端销毁 Session
+- 登录限速：同一来源 15 分钟窗口内失败 10 次后锁定，密码比较经哈希后常数时间执行
 
 ## 功能
 
@@ -105,8 +131,7 @@ node server/app.js
 - Bilibili 风格标签选择器：输入框 + 下拉列表 + 已选标签
 - 下拉按参与次数降序，实时模糊搜索
 - 回车匹配库中人员或新增，点击标签移除
-- 首次使用自动生成 10 个随机中文姓名（Mock 数据）
-- 保存旅行时自动调用 `POST /api/participants/batch` 批量记录参与（已存在 +1 次，新人员插入）
+- 保存旅行时调用 `POST /api/participants/batch` 批量记录参与，仅对本次新增的人员 +1 次（重复保存不虚增次数）
 - 设置页人员管理：搜索、分页（5/10/15）、添加、删除
 
 ### 设置页
@@ -120,7 +145,7 @@ node server/app.js
 | 图钉大小     | 2–30 px              | 7      | 地图上图钉的半径                                 |
 | 默认缩放     | 0.3–5                | 1      | 打开页面时的初始地图缩放级别                     |
 | 卡片缩放     | 10%–100%（首页滑块） | 100%   | 卡片等比缩放，游客模式本地缓存                   |
-| 清理缓存     | —                    | —     | 移动孤立媒体文件至 `media_recycle/` 时间戳目录 |
+| 清理缓存     | —                    | —     | 移动孤立媒体文件至 `media_recycle/` 时间戳目录（覆盖相册/富文本/附件；未保存的草稿图有 24 小时宽限期） |
 | 人员管理     | —                    | —     | 搜索、分页、增删参与人员                         |
 
 ### 导出
@@ -140,7 +165,7 @@ node server/app.js
 | GET    | `/api/trips`                       | —    | 获取所有旅行                    |
 | POST   | `/api/trips`                       | admin | 创建旅行（含文件上传）          |
 | PUT    | `/api/trips/:id`                   | admin | 更新旅行（部分字段可选）        |
-| DELETE | `/api/trips/:id`                   | admin | 删除旅行及关联媒体文件          |
+| DELETE | `/api/trips/:id`                   | admin | 删除旅行（媒体文件移入回收站）  |
 | GET    | `/api/trips/:id/files`             | —    | 获取旅行的相册/附件列表         |
 | POST   | `/api/trips/:id/files`             | admin | 追加相册/附件                   |
 | DELETE | `/api/trips/:id/files?type=&name=` | admin | 删除单个相册/附件               |
@@ -207,19 +232,21 @@ node server/app.js
 - 所有 SQL 使用参数化查询（`@name` → `$name` 转换），无字符串拼接
 - 所有写 API 需 admin 登录（`requireAdmin` 中间件）
 - 用户输入（卡片名称、人员姓名等）前端 `escapeHtml()` 转义
-- 富文本后端 `sanitize-html` 净化，移除 script/onerror 等
+- 富文本后端 `sanitize-html` 净化，移除 script/onerror 等，并禁用协议相对 URL（`//evil.com/x.png`）
+- Helmet CSP：禁止外部脚本与远程资源（允许 inline 样式，Quill/GLightbox 需要）
 - 文件上传：扩展名白名单（`.jpg/.png/.webp/.gif/.pdf/.mp4/.mov/.txt`）+ MIME 校验
 - 文件名 `safeName()` 过滤路径穿越字符
 - Multer 限制：`fileSize: 200MB`，`fieldSize: 100KB`
-- Helmet 安全响应头（X-Frame-Options / X-Content-Type-Options / HSTS 等）
 - Session：httpOnly + sameSite: lax + 登录重新生成 ID + 登出服务端销毁
-- 错误响应统一返回 JSON，不泄露内部细节
+- 登录限速 + 常数时间密码比较；服务默认仅监听 `127.0.0.1`（可用环境变量 `HOST` 覆盖）
+- 错误响应统一返回 JSON：客户端错误返回原因，服务端错误不泄露内部细节
 - 配置文件 `config.json` 位于 `public/` 外，不可通过 HTTP 访问
 
 ## 说明
 
-- 服务端口固定 3002
+- 服务端口固定 3002，默认仅监听本机回环地址（局域网无法访问）
 - 本地单用户使用
-- 媒体文件清理移至 `media_recycle/` 时间戳目录，不直接删除
+- 媒体文件删除/清理均移至 `media_recycle/` 时间戳目录，不直接物理删除
+- 新建旅行时富文本图片先存于 `richtext_images/draft/`，保存时自动迁移到旅行目录并改写 URL
 - 省市数据来源 [regions-data](https://github.com/slightlee/regions-data)
 - 使用 pnpm 管理依赖，`pnpm install` 安装

@@ -39,24 +39,6 @@
       <div class="login-error" id="loginError"></div>
     </form>
   </div>
-  <script>
-    const form = document.querySelector('#loginForm');
-    const errorEl = document.querySelector('#loginError');
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const res = await fetch('/api/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: form.elements.password.value })
-      });
-      if (res.ok) {
-        const params = new URLSearchParams(window.location.search);
-        window.location.href = params.get('redirect') || '/';
-      } else {
-        errorEl.textContent = '密码错误';
-        errorEl.style.display = 'block';
-      }
-    });
-  </script>
+  <script src="login.js"></script>
 </body>
 </html>

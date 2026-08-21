@@ -22,5 +22,4 @@ media/
 media_recycle*/
 .claude/worktrees/
 /tripmap.sqlite*
-/tripmap.sqlite-shm
-/tripmap.sqlite-wal
+.workbuddy/

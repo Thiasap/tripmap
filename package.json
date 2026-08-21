@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "本地单用户旅行地图",
   "main": "server/app.js",
+  "private": true,
+  "engines": {
+    "node": ">=22.5"
+  },
   "scripts": {
     "start": "node server/app.js"
   },

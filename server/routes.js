@@ -35,9 +35,15 @@ const MB = 1024 * 1024;
 
 function fileFilter(req, file, cb) {
   const ext = path.extname(file.originalname).toLowerCase();
-  if (!SAFE_EXT.has(ext)) return cb(new Error(`不支持的文件类型: ${ext}`));
+  if (!SAFE_EXT.has(ext)) {
+    const error = new Error(`不支持的文件类型: ${ext || '（无扩展名）'}`);
+    error.status = 400;
+    return cb(error);
+  }
   if (file.fieldname !== 'attachments' && !IMAGE_MIMES.has(file.mimetype)) {
-    return cb(new Error(`仅支持图片格式: ${file.mimetype}`));
+    const error = new Error(`仅支持图片格式: ${file.mimetype}`);
+    error.status = 400;
+    return cb(error);
   }
   cb(null, true);
 }
@@ -93,22 +99,24 @@ function pathsFor(id) {
 
 function normalizeTrip(row) {
   if (!row) return null;
-  return {
-    ...row,
-    cover_meta: row.cover_meta ? JSON.parse(row.cover_meta) : null
-  };
+  let coverMeta = null;
+  try { coverMeta = row.cover_meta ? JSON.parse(row.cover_meta) : null; } catch { coverMeta = null; }
+  return { ...row, cover_meta: coverMeta };
 }
 
 function fileList(dir) {
   if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir).filter((name) => !name.startsWith('thumb_')).map((name) => ({
+  // 过滤缩略图（thumb_）与封面（cover_），封面单独展示，不作为相册图片重复列出
+  return fs.readdirSync(dir).filter((name) => !name.startsWith('thumb_') && !name.startsWith('cover_')).map((name) => ({
     name,
     url: toPublicPath(path.join(dir, name))
   }));
 }
 
 async function processImage(input, output, options = {}) {
-  const image = sharp(input).rotate();
+  const image = sharp(input).rotate()
+    // 透明 PNG/GIF 转 JPEG 时铺白底，避免变黑底
+    .flatten({ background: '#ffffff' });
   if (options.resize) image.resize(options.resize);
   await image.jpeg({ quality: options.quality || 82, mozjpeg: true }).toFile(output);
 }
@@ -121,11 +129,12 @@ async function saveUploads(id, files = {}) {
 
   if (files.cover?.[0]) {
     const output = path.join(dirs.album, `cover_${id}.jpg`);
-    const metadata = await sharp(files.cover[0].path).metadata();
     await processImage(files.cover[0].path, output, { resize: { width: 1400, withoutEnlargement: true }, quality: 78 });
     fs.unlinkSync(files.cover[0].path);
+    // 从处理后的文件读取尺寸：原图 metadata 不含 EXIF 旋转，竖拍照片宽高会颠倒
+    const outputMeta = await sharp(output).metadata();
     coverPath = toPublicPath(output);
-    coverMeta = { width: metadata.width || 4, height: metadata.height || 3 };
+    coverMeta = { width: outputMeta.width || 4, height: outputMeta.height || 3 };
   }
 
   for (const file of files.album || []) {
@@ -175,17 +184,48 @@ function clampNumber(value, min, max, fallback) {
 const richTextAllowed = {
   allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img', 'h1', 'h2', 'u', 's']),
   allowedAttributes: { ...sanitizeHtml.defaults.allowedAttributes, img: ['src', 'alt'] },
-  allowedSchemes: ['http', 'https']
+  allowedSchemes: ['http', 'https'],
+  // 禁止 //evil.com/x.png 这类协议相对 URL 绕过 scheme 白名单
+  allowProtocolRelative: false
 };
 function sanitizeRichText(html) {
   if (!html || typeof html !== 'string') return '';
   return sanitizeHtml(html, richTextAllowed);
 }
 
+// 新建旅行时，富文本图片先上传到 richtext_images/draft/，保存时迁移到旅行自己的目录，
+// 并把 HTML 中的 URL 一并改写。否则清理逻辑回收 draft/ 会导致已保存旅行的图片失效。
+function migrateDraftImages(tripId, html) {
+  const draftDir = path.join(mediaDir, 'richtext_images', 'draft');
+  const targetDir = path.join(mediaDir, 'richtext_images', tripId);
+  const draftPrefix = '/media/richtext_images/draft/';
+  let result = String(html || '');
+  if (!result.includes(draftPrefix) || !fs.existsSync(draftDir)) return result;
+  ensureDir(targetDir);
+  // 注意模板字符串中需写 \\s，否则退化为普通字符 s
+  result = result.replace(new RegExp(`${draftPrefix}([^"'\\s<>)]+)`, 'g'), (match, encodedName) => {
+    let name;
+    try { name = decodeURIComponent(encodedName); } catch { name = encodedName; }
+    const safe = safeName(name);
+    const from = path.join(draftDir, safe);
+    const to = path.join(targetDir, safe);
+    if (!fs.existsSync(from)) return match; // 文件已不存在（如被清理），保留原 URL
+    fs.renameSync(from, to);
+    return `${draftPrefix.replace('draft', tripId)}${encodeURIComponent(safe)}`;
+  });
+  return result;
+}
+
 function roundCoordinate(value) {
   if (value === undefined || value === null || value === '') return null;
   const number = Number(value);
   return Number.isFinite(number) ? Number(number.toFixed(4)) : null;
+}
+
+// 卡片坐标：非法值（NaN 等）回退到 fallback，避免 node:sqlite 把 NaN 静默存成 NULL 清空坐标
+function coordinateOrFallback(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
 }
 
 function getSettings() {
@@ -245,7 +285,13 @@ function cleanupMediaFiles() {
   });
 
   const moved = [];
-  const roots = [path.join(mediaDir, 'album'), path.join(mediaDir, 'richtext_images')];
+  // draft/ 宽限期：正在编辑中的未保存草稿图不被立即回收
+  const DRAFT_GRACE_MS = 24 * 60 * 60 * 1000;
+  const roots = [
+    path.join(mediaDir, 'album'),
+    path.join(mediaDir, 'richtext_images'),
+    path.join(mediaDir, 'attachments') // 孤儿旅行目录同样回收
+  ];
   roots.forEach((root) => {
     walkFiles(root).forEach((filePath) => {
       const relative = path.relative(root, filePath).split(path.sep);
@@ -253,9 +299,11 @@ function cleanupMediaFiles() {
       const name = path.basename(filePath);
       const resolved = path.resolve(filePath);
       const originalForThumb = name.startsWith('thumb_') ? path.join(path.dirname(filePath), name.slice(6, -4)) : null;
-      const orphanTripDir = !tripIds.has(tripId);
-      const draftRichText = root.endsWith(`richtext_images`) && tripId === 'draft';
-      const unusedRichText = root.endsWith(`richtext_images`) && !keep.has(resolved);
+      const isRichTextRoot = root.endsWith(`richtext_images`);
+      // draft 目录不是旅行目录，交给宽限期规则处理，不算孤儿
+      const orphanTripDir = !tripIds.has(tripId) && !(isRichTextRoot && tripId === 'draft');
+      const draftRichText = isRichTextRoot && tripId === 'draft' && (Date.now() - fs.statSync(filePath).mtimeMs > DRAFT_GRACE_MS);
+      const unusedRichText = isRichTextRoot && tripId !== 'draft' && !keep.has(resolved);
       const orphanThumb = originalForThumb && !fs.existsSync(originalForThumb);
       if (orphanTripDir || draftRichText || unusedRichText || orphanThumb) {
         moved.push({ from: toPublicPath(filePath), to: path.relative(rootDir, moveToRecycle(filePath, stamp)).replace(/\\/g, '/') });
@@ -293,9 +341,12 @@ router.post('/cleanup-media', requireAdmin, (req, res, next) => {
   }
 });
 
+let regionsCache = null;
 router.get('/regions', (req, res, next) => {
   try {
-    res.json(JSON.parse(fs.readFileSync(path.join(rootDir, 'regions_L1_L2.json'), 'utf8')));
+    // 数据静态，读一次缓存到内存
+    if (!regionsCache) regionsCache = JSON.parse(fs.readFileSync(path.join(rootDir, 'regions_L1_L2.json'), 'utf8'));
+    res.json(regionsCache);
   } catch (error) {
     next(error);
   }
@@ -335,13 +386,13 @@ router.post('/trips', requireAdmin, tripFields, async (req, res, next) => {
       start_date: req.body.start_date || '',
       end_date: req.body.end_date || '',
       participants: req.body.participants || '',
-      rich_text_path: sanitizeRichText(req.body.rich_text),
+      rich_text_path: migrateDraftImages(id, sanitizeRichText(req.body.rich_text)),
       album_path: saved.album_path,
       attachments_path: saved.attachments_path,
       cover_path: saved.cover_path || '',
       cover_meta: saved.cover_meta ? JSON.stringify(saved.cover_meta) : '',
-      card_position_x: Number(req.body.card_position_x) || 104,
-      card_position_y: Number(req.body.card_position_y) || 35,
+      card_position_x: coordinateOrFallback(req.body.card_position_x, 104),
+      card_position_y: coordinateOrFallback(req.body.card_position_y, 35),
       created_at: now,
       updated_at: now
     };
@@ -372,13 +423,13 @@ router.put('/trips/:id', requireAdmin, tripFields, async (req, res, next) => {
       start_date: req.body.start_date ?? existing.start_date,
       end_date: req.body.end_date ?? existing.end_date,
       participants: req.body.participants ?? existing.participants,
-      rich_text_path: req.body.rich_text !== undefined ? sanitizeRichText(req.body.rich_text) : existing.rich_text_path,
+      rich_text_path: req.body.rich_text !== undefined ? migrateDraftImages(existing.id, sanitizeRichText(req.body.rich_text)) : existing.rich_text_path,
       album_path: saved.album_path || existing.album_path,
       attachments_path: saved.attachments_path || existing.attachments_path,
       cover_path: saved.cover_path || existing.cover_path,
       cover_meta: saved.cover_meta ? JSON.stringify(saved.cover_meta) : existing.cover_meta,
-      card_position_x: req.body.card_position_x === undefined ? existing.card_position_x : Number(req.body.card_position_x),
-      card_position_y: req.body.card_position_y === undefined ? existing.card_position_y : Number(req.body.card_position_y),
+      card_position_x: req.body.card_position_x === undefined ? existing.card_position_x : coordinateOrFallback(req.body.card_position_x, existing.card_position_x),
+      card_position_y: req.body.card_position_y === undefined ? existing.card_position_y : coordinateOrFallback(req.body.card_position_y, existing.card_position_y),
       updated_at: new Date().toISOString()
     };
     db.prepare(`
@@ -417,8 +468,12 @@ router.delete('/trips/:id', requireAdmin, (req, res, next) => {
     const existing = db.prepare('SELECT * FROM trips WHERE id = ?').get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'Trip not found' });
     db.prepare('DELETE FROM trips WHERE id = ?').run(req.params.id);
+    // 与清理策略一致：媒体目录移入回收站，不直接物理删除
+    const stamp = timestampName();
     const dirs = pathsFor(req.params.id);
-    Object.values(dirs).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true }));
+    Object.values(dirs).forEach((dir) => {
+      if (fs.existsSync(dir)) moveToRecycle(dir, stamp);
+    });
     res.status(204).end();
   } catch (error) {
     next(error);
@@ -467,6 +522,13 @@ router.get('/participants', (req, res) => {
   res.json(rows);
 });
 
+// 解析参与次数：非法输入返回 null（由调用方决定报错或回退）
+function parseCount(value) {
+  if (value === undefined || value === '') return null;
+  const number = parseInt(value, 10);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
 router.post('/participants/batch', requireAdmin, (req, res, next) => {
   try {
     const names = [...new Set((req.body.names || []).map((n) => String(n).trim()).filter(Boolean))];
@@ -479,8 +541,16 @@ router.post('/participants/batch', requireAdmin, (req, res, next) => {
         last_participated_at = excluded.last_participated_at,
         count = count + 1
     `);
-    for (const name of names) {
-      upsert.run(name, now);
+    // 事务保证批量写入的原子性
+    db.exec('BEGIN');
+    try {
+      for (const name of names) {
+        upsert.run(name, now);
+      }
+      db.exec('COMMIT');
+    } catch (txError) {
+      db.exec('ROLLBACK');
+      throw txError;
     }
     res.json({ processed: names.length });
   } catch (error) {
@@ -495,7 +565,8 @@ router.post('/participants', requireAdmin, (req, res, next) => {
     const existing = db.prepare('SELECT id FROM participants WHERE name = ?').get(name);
     if (existing) return res.status(409).json({ error: 'Participant already exists' });
     const lastParticipatedAt = req.body.last_participated_at || new Date().toISOString();
-    const count = req.body.count === undefined || req.body.count === '' ? 0 : parseInt(req.body.count);
+    const count = parseCount(req.body.count);
+    if (count === null) return res.status(400).json({ error: 'Invalid count' });
     db.prepare('INSERT INTO participants (name, last_participated_at, count) VALUES (?, ?, ?)').run(name, lastParticipatedAt, count);
     const row = db.prepare('SELECT * FROM participants WHERE rowid = last_insert_rowid()').get();
     res.status(201).json(row);
@@ -510,7 +581,9 @@ router.put('/participants/:id', requireAdmin, (req, res, next) => {
     if (!existing) return res.status(404).json({ error: 'Not found' });
     const name = String(req.body.name ?? existing.name).trim();
     const lastParticipatedAt = req.body.last_participated_at || existing.last_participated_at;
-    const count = req.body.count === undefined || req.body.count === '' ? existing.count : parseInt(req.body.count);
+    // 未传 count 时保留现值；传了但非法则报错
+    const count = req.body.count === undefined || req.body.count === '' ? existing.count : parseCount(req.body.count);
+    if (count === null) return res.status(400).json({ error: 'Invalid count' });
     db.prepare('UPDATE participants SET name=?, last_participated_at=?, count=? WHERE id=?').run(name, lastParticipatedAt, count, req.params.id);
     const row = db.prepare('SELECT * FROM participants WHERE id = ?').get(req.params.id);
     res.json(row);
