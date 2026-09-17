@@ -2,18 +2,13 @@ const express = require('express');
 const path = require('path');
 const helmet = require('helmet');
 const jwt = require('jsonwebtoken');
-const { initDB } = require('./db');
-const routes = require('./routes');
+const { initDB } = require('../server/db');
+const routes = require('../server/routes');
 
 const app = express();
-const port = process.env.PORT || 3002;
 const rootDir = path.join(__dirname, '..');
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || (function () {
-  try { return require(path.join(rootDir, 'config.json')).ADMIN_PASSWORD; } catch { return 'admin'; }
-})();
-const JWT_SECRET = process.env.SESSION_SECRET || (function () {
-  try { return require(path.join(rootDir, 'config.json')).SESSION_SECRET; } catch { return `tripmap_${Math.random().toString(36).slice(2)}`; }
-})();
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin';
+const JWT_SECRET = process.env.SESSION_SECRET || `tripmap_${Math.random().toString(36).slice(2)}`;
 
 app.use(helmet({
   contentSecurityPolicy: false,
@@ -33,13 +28,7 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '20mb' }));
 
-// Vendor static files
-app.use('/vendor/d3', express.static(path.join(rootDir, 'node_modules', 'd3', 'dist')));
-app.use('/vendor/quill', express.static(path.join(rootDir, 'node_modules', 'quill', 'dist')));
-app.use('/vendor/glightbox', express.static(path.join(rootDir, 'node_modules', 'glightbox', 'dist')));
-app.use('/vendor/html2canvas', express.static(path.join(rootDir, 'node_modules', 'html2canvas', 'dist')));
-
-// Login
+// Login (JWT-based, replaces express-session)
 app.post('/api/login', (req, res) => {
   if (String(req.body.password || '') !== ADMIN_PASSWORD) {
     return res.status(403).json({ error: '密码错误' });
@@ -48,17 +37,23 @@ app.post('/api/login', (req, res) => {
   res.cookie('token', token, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: false,
+    secure: process.env.NODE_ENV === 'production',
     maxAge: 24 * 60 * 60 * 1000
   });
   res.json({ role: 'admin' });
 });
 
+// Logout
 app.post('/api/logout', (req, res) => {
-  res.clearCookie('token', { httpOnly: true, sameSite: 'lax', secure: false });
+  res.clearCookie('token', {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production'
+  });
   res.json({ role: 'guest' });
 });
 
+// Auth status check
 app.get('/api/auth/status', (req, res) => {
   const token = req.cookies?.token;
   if (!token) return res.json({ role: 'guest' });
@@ -72,7 +67,11 @@ app.get('/api/auth/status', (req, res) => {
 
 app.use('/api', routes);
 
-app.use(express.static(path.join(rootDir, 'public')));
+// Static files: vendor libraries
+app.use('/vendor', express.static(path.join(rootDir, 'public', 'vendor'), { maxAge: '7d' }));
+
+// Static files: public assets (must be after /api and /vendor)
+app.use(express.static(path.join(rootDir, 'public'), { maxAge: '1h' }));
 
 app.use((err, req, res, next) => {
   console.error(err);
@@ -81,11 +80,7 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: message });
 });
 
-initDB().then(() => {
-  app.listen(port, () => {
-    console.log(`旅行地图已启动：http://localhost:${port}`);
-  });
-}).catch(err => {
-  console.error('DB init error:', err);
-  process.exit(1);
-});
+// Initialize DB on cold start
+initDB().catch(err => console.error('DB init error:', err));
+
+module.exports = app;

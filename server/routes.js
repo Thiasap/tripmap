@@ -1,21 +1,26 @@
 const express = require('express');
-const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const sharp = require('sharp');
-const sanitizeHtml = require('sanitize-html');
-const db = require('./db');
+const { put, del, list } = require('@vercel/blob');
+const jwt = require('jsonwebtoken');
+const { sql } = require('./db');
 
 const router = express.Router();
 
+let cachedRegions = null;
+const JWT_SECRET = process.env.SESSION_SECRET || 'tripmap_default_secret';
+
 function requireAdmin(req, res, next) {
-  if (req.session && req.session.isAdmin) return next();
-  return res.status(401).json({ error: '需要管理员登录' });
+  const token = req.cookies?.token;
+  if (!token) return res.status(401).json({ error: '需要管理员登录' });
+  try {
+    jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    return res.status(401).json({ error: '登录已过期' });
+  }
 }
-const rootDir = path.join(__dirname, '..');
-const mediaDir = path.join(rootDir, 'media');
-const recycleDir = path.join(rootDir, 'media_recycle');
-const tempDir = path.join(mediaDir, '.tmp');
 
 const settingDefaults = {
   card_max_width: 360,
@@ -27,31 +32,23 @@ const settingDefaults = {
   default_zoom: 1
 };
 
-fs.mkdirSync(tempDir, { recursive: true });
-
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const SAFE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif', '.pdf', '.mp4', '.mov', '.txt']);
 const MB = 1024 * 1024;
 
 function fileFilter(req, file, cb) {
   const ext = path.extname(file.originalname).toLowerCase();
-  if (!SAFE_EXT.has(ext)) {
-    const error = new Error(`不支持的文件类型: ${ext || '（无扩展名）'}`);
-    error.status = 400;
-    return cb(error);
-  }
+  if (!SAFE_EXT.has(ext)) return cb(new Error(`不支持的文件类型: ${ext}`));
   if (file.fieldname !== 'attachments' && !IMAGE_MIMES.has(file.mimetype)) {
-    const error = new Error(`仅支持图片格式: ${file.mimetype}`);
-    error.status = 400;
-    return cb(error);
+    return cb(new Error(`仅支持图片格式: ${file.mimetype}`));
   }
   cb(null, true);
 }
 
 const upload = multer({
-  dest: tempDir,
+  storage: multer.memoryStorage(),
   fileFilter,
-  limits: { fileSize: 200 * MB, fieldSize: 100 * 1024 }
+  limits: { fileSize: 200 * MB }
 });
 const tripFields = upload.fields([
   { name: 'cover', maxCount: 1 },
@@ -60,18 +57,6 @@ const tripFields = upload.fields([
   { name: 'richtextImages', maxCount: 100 }
 ]);
 
-function ensureDir(dir) {
-  fs.mkdirSync(dir, { recursive: true });
-}
-
-function toPublicPath(filePath) {
-  return `/${path.relative(rootDir, filePath).replace(/\\/g, '/')}`;
-}
-
-function safeName(name) {
-  return path.basename(name || 'file').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
-}
-
 function textHash(value) {
   let hash = 0;
   const text = String(value || '00');
@@ -79,141 +64,160 @@ function textHash(value) {
   return String(hash).padStart(4, '0');
 }
 
-function makeTripId(province, city) {
+async function makeTripId(province, city) {
   const provincePart = textHash(province).slice(0, 4);
   const cityPart = textHash(city).slice(0, 4);
   let id;
   do {
     id = `${provincePart}${cityPart}${Math.random().toString(36).slice(2, 8)}`;
-  } while (db.prepare('SELECT 1 FROM trips WHERE id = ?').get(id));
+    const rows = await sql`SELECT 1 FROM trips WHERE id = ${id}`;
+    if (rows.length === 0) break;
+  } while (true);
   return id;
 }
 
-function pathsFor(id) {
-  return {
-    rich: path.join(mediaDir, 'richtext_images', id),
-    album: path.join(mediaDir, 'album', id),
-    attachments: path.join(mediaDir, 'attachments', id)
-  };
+function safeName(name) {
+  return path.basename(name || 'file').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
 }
 
 function normalizeTrip(row) {
   if (!row) return null;
-  let coverMeta = null;
-  try { coverMeta = row.cover_meta ? JSON.parse(row.cover_meta) : null; } catch { coverMeta = null; }
-  return { ...row, cover_meta: coverMeta };
+  return {
+    ...row,
+    cover_meta: row.cover_meta ? JSON.parse(row.cover_meta) : null
+  };
 }
 
-function fileList(dir) {
-  if (!fs.existsSync(dir)) return [];
-  // 过滤缩略图（thumb_）与封面（cover_），封面单独展示，不作为相册图片重复列出
-  return fs.readdirSync(dir).filter((name) => !name.startsWith('thumb_') && !name.startsWith('cover_')).map((name) => ({
-    name,
-    url: toPublicPath(path.join(dir, name))
-  }));
-}
-
-async function processImage(input, output, options = {}) {
-  const image = sharp(input).rotate()
-    // 透明 PNG/GIF 转 JPEG 时铺白底，避免变黑底
-    .flatten({ background: '#ffffff' });
+async function processImageBuffer(buffer, options = {}) {
+  const image = sharp(buffer).rotate();
   if (options.resize) image.resize(options.resize);
-  await image.jpeg({ quality: options.quality || 82, mozjpeg: true }).toFile(output);
+  return image.jpeg({ quality: options.quality || 82, mozjpeg: true }).toBuffer();
 }
 
 async function saveUploads(id, files = {}) {
-  const dirs = pathsFor(id);
-  Object.values(dirs).forEach(ensureDir);
   let coverPath = null;
   let coverMeta = null;
 
   if (files.cover?.[0]) {
-    const output = path.join(dirs.album, `cover_${id}.jpg`);
-    await processImage(files.cover[0].path, output, { resize: { width: 1400, withoutEnlargement: true }, quality: 78 });
-    fs.unlinkSync(files.cover[0].path);
-    // 从处理后的文件读取尺寸：原图 metadata 不含 EXIF 旋转，竖拍照片宽高会颠倒
-    const outputMeta = await sharp(output).metadata();
-    coverPath = toPublicPath(output);
-    coverMeta = { width: outputMeta.width || 4, height: outputMeta.height || 3 };
+    const metadata = await sharp(files.cover[0].buffer).metadata();
+    const processed = await processImageBuffer(files.cover[0].buffer, {
+      resize: { width: 1400, withoutEnlargement: true },
+      quality: 78
+    });
+    const blob = await put(`album/${id}/cover_${id}.jpg`, processed, {
+      access: 'public',
+      contentType: 'image/jpeg'
+    });
+    coverPath = blob.url;
+    coverMeta = { width: metadata.width || 4, height: metadata.height || 3 };
   }
 
   for (const file of files.album || []) {
     const ext = path.extname(file.originalname) || '.jpg';
     const name = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
-    const target = path.join(dirs.album, safeName(name));
-    const thumb = path.join(dirs.album, `thumb_${safeName(name)}.jpg`);
-    fs.renameSync(file.path, target);
+    const blob = await put(`album/${id}/${safeName(name)}`, file.buffer, {
+      access: 'public',
+      contentType: file.mimetype
+    });
     try {
-      await processImage(target, thumb, { resize: { width: 320, height: 220, fit: 'inside', withoutEnlargement: true }, quality: 72 });
-    } catch {
-      if (fs.existsSync(thumb)) fs.unlinkSync(thumb);
-    }
+      const thumb = await processImageBuffer(file.buffer, {
+        resize: { width: 320, height: 220, fit: 'inside', withoutEnlargement: true },
+        quality: 72
+      });
+      await put(`album/${id}/thumb_${safeName(name)}.jpg`, thumb, {
+        access: 'public',
+        contentType: 'image/jpeg'
+      });
+    } catch { /* thumbnail generation best-effort */ }
   }
 
   for (const file of files.attachments || []) {
-    const target = path.join(dirs.attachments, `${Date.now()}_${safeName(file.originalname)}`);
-    fs.renameSync(file.path, target);
+    const blob = await put(`attachments/${id}/${Date.now()}_${safeName(file.originalname)}`, file.buffer, {
+      access: 'public',
+      contentType: file.mimetype
+    });
   }
 
   for (const file of files.richtextImages || []) {
-    const target = path.join(dirs.rich, `${Date.now()}_${safeName(file.originalname)}`);
-    fs.renameSync(file.path, target);
+    const blob = await put(`richtext_images/${id}/${Date.now()}_${safeName(file.originalname)}`, file.buffer, {
+      access: 'public',
+      contentType: file.mimetype
+    });
   }
 
-  return {
-    rich_text_path: toPublicPath(dirs.rich),
-    album_path: toPublicPath(dirs.album),
-    attachments_path: toPublicPath(dirs.attachments),
-    cover_path: coverPath,
-    cover_meta: coverMeta
-  };
+  return { cover_path: coverPath, cover_meta: coverMeta };
 }
 
-function cleanupTemp(files = {}) {
-  Object.values(files).flat().forEach((file) => {
-    if (file?.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
-  });
+async function fileList(prefix) {
+  try {
+    const { blobs } = await list({ prefix, limit: 1000 });
+    const result = [];
+    for (const blob of blobs) {
+      const name = blob.pathname.split('/').pop();
+      if (name.startsWith('thumb_') || name.startsWith('cover_')) continue;
+      const entry = { name, url: blob.url };
+      const thumbPath = blob.pathname.replace(new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`), `thumb_${name}.jpg`);
+      try {
+        const { blobs: thumbs } = await list({ prefix: thumbPath, limit: 1 });
+        if (thumbs.length) entry.thumb = thumbs[0].url;
+      } catch { /* no thumb */ }
+      result.push(entry);
+    }
+    return result;
+  } catch {
+    return [];
+  }
+}
+
+async function deleteBlobsByPrefix(prefix) {
+  try {
+    const { blobs } = await list({ prefix, limit: 1000 });
+    await Promise.all(blobs.map(b => del(b.url)));
+  } catch { /* ignore */ }
+}
+
+async function cleanupMediaFiles() {
+  const trips = await sql`SELECT id FROM trips`;
+  const tripIds = new Set(trips.map(t => t.id));
+  const prefixMap = {
+    album: [],
+    richtext_images: [],
+    attachments: []
+  };
+
+  // Collect all blobs grouped by prefix type
+  for (const prefix of ['album', 'richtext_images', 'attachments']) {
+    try {
+      const { blobs } = await list({ prefix: `${prefix}/`, limit: 1000 });
+      for (const blob of blobs) {
+        const parts = blob.pathname.split('/');
+        const tripId = parts[1];
+        if (!tripId) continue;
+        prefixMap[prefix].push({ blob, tripId });
+      }
+    } catch { /* ignore */ }
+  }
+
+  const moved = [];
+  for (const [type, entries] of Object.entries(prefixMap)) {
+    for (const { blob, tripId } of entries) {
+      if (!tripIds.has(tripId)) {
+        const name = blob.pathname.split('/').pop();
+        if (name.startsWith('thumb_') || name.startsWith('cover_')) {
+          await del(blob.url);
+          moved.push({ from: blob.pathname, deleted: true });
+        }
+      }
+    }
+  }
+
+  return { moved_count: moved.length, moved };
 }
 
 function clampNumber(value, min, max, fallback) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return fallback;
-  return Math.max(min, Math.min(max, number));
-}
-
-const richTextAllowed = {
-  allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img', 'h1', 'h2', 'u', 's']),
-  allowedAttributes: { ...sanitizeHtml.defaults.allowedAttributes, img: ['src', 'alt'] },
-  allowedSchemes: ['http', 'https'],
-  // 禁止 //evil.com/x.png 这类协议相对 URL 绕过 scheme 白名单
-  allowProtocolRelative: false
-};
-function sanitizeRichText(html) {
-  if (!html || typeof html !== 'string') return '';
-  return sanitizeHtml(html, richTextAllowed);
-}
-
-// 新建旅行时，富文本图片先上传到 richtext_images/draft/，保存时迁移到旅行自己的目录，
-// 并把 HTML 中的 URL 一并改写。否则清理逻辑回收 draft/ 会导致已保存旅行的图片失效。
-function migrateDraftImages(tripId, html) {
-  const draftDir = path.join(mediaDir, 'richtext_images', 'draft');
-  const targetDir = path.join(mediaDir, 'richtext_images', tripId);
-  const draftPrefix = '/media/richtext_images/draft/';
-  let result = String(html || '');
-  if (!result.includes(draftPrefix) || !fs.existsSync(draftDir)) return result;
-  ensureDir(targetDir);
-  // 注意模板字符串中需写 \\s，否则退化为普通字符 s
-  result = result.replace(new RegExp(`${draftPrefix}([^"'\\s<>)]+)`, 'g'), (match, encodedName) => {
-    let name;
-    try { name = decodeURIComponent(encodedName); } catch { name = encodedName; }
-    const safe = safeName(name);
-    const from = path.join(draftDir, safe);
-    const to = path.join(targetDir, safe);
-    if (!fs.existsSync(from)) return match; // 文件已不存在（如被清理），保留原 URL
-    fs.renameSync(from, to);
-    return `${draftPrefix.replace('draft', tripId)}${encodeURIComponent(safe)}`;
-  });
-  return result;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(min, Math.min(max, num));
 }
 
 function roundCoordinate(value) {
@@ -222,385 +226,241 @@ function roundCoordinate(value) {
   return Number.isFinite(number) ? Number(number.toFixed(4)) : null;
 }
 
-// 卡片坐标：非法值（NaN 等）回退到 fallback，避免 node:sqlite 把 NaN 静默存成 NULL 清空坐标
-function coordinateOrFallback(value, fallback) {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : fallback;
-}
+// Routes
 
-function getSettings() {
-  const rows = db.prepare('SELECT key, value FROM settings').all();
-  return rows.reduce((settings, row) => ({
-    ...settings,
-    [row.key]: Number(row.value)
-  }), { ...settingDefaults });
-}
-
-function saveSettings(settings) {
-  Object.entries(settings).forEach(([key, value]) => {
-    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run(key, String(value));
-  });
-}
-
-function timestampName(date = new Date()) {
-  const pad = (value) => String(value).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
-}
-
-function publicPathToFilePath(url) {
-  if (!url || !String(url).startsWith('/media/')) return null;
-  return path.join(rootDir, String(url).slice(1));
-}
-
-function extractMediaPaths(html) {
-  return Array.from(String(html || '').matchAll(/["'](\/media\/[^"']+)["']/g), (match) => publicPathToFilePath(decodeURIComponent(match[1]))).filter(Boolean);
-}
-
-function walkFiles(dir) {
-  if (!fs.existsSync(dir)) return [];
-  return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    const current = path.join(dir, entry.name);
-    return entry.isDirectory() ? walkFiles(current) : [current];
-  });
-}
-
-function moveToRecycle(filePath, stamp) {
-  const relative = path.relative(rootDir, filePath);
-  const target = path.join(recycleDir, stamp, relative);
-  ensureDir(path.dirname(target));
-  fs.renameSync(filePath, target);
-  return target;
-}
-
-function cleanupMediaFiles() {
-  const stamp = timestampName();
-  const trips = db.prepare('SELECT id, cover_path, rich_text_path FROM trips').all();
-  const tripIds = new Set(trips.map((trip) => trip.id));
-  const keep = new Set();
-
-  trips.forEach((trip) => {
-    const cover = publicPathToFilePath(trip.cover_path);
-    if (cover) keep.add(path.resolve(cover));
-    extractMediaPaths(trip.rich_text_path).forEach((filePath) => keep.add(path.resolve(filePath)));
-  });
-
-  const moved = [];
-  // draft/ 宽限期：正在编辑中的未保存草稿图不被立即回收
-  const DRAFT_GRACE_MS = 24 * 60 * 60 * 1000;
-  const roots = [
-    path.join(mediaDir, 'album'),
-    path.join(mediaDir, 'richtext_images'),
-    path.join(mediaDir, 'attachments') // 孤儿旅行目录同样回收
-  ];
-  roots.forEach((root) => {
-    walkFiles(root).forEach((filePath) => {
-      const relative = path.relative(root, filePath).split(path.sep);
-      const tripId = relative[0];
-      const name = path.basename(filePath);
-      const resolved = path.resolve(filePath);
-      const originalForThumb = name.startsWith('thumb_') ? path.join(path.dirname(filePath), name.slice(6, -4)) : null;
-      const isRichTextRoot = root.endsWith(`richtext_images`);
-      // draft 目录不是旅行目录，交给宽限期规则处理，不算孤儿
-      const orphanTripDir = !tripIds.has(tripId) && !(isRichTextRoot && tripId === 'draft');
-      const draftRichText = isRichTextRoot && tripId === 'draft' && (Date.now() - fs.statSync(filePath).mtimeMs > DRAFT_GRACE_MS);
-      const unusedRichText = isRichTextRoot && tripId !== 'draft' && !keep.has(resolved);
-      const orphanThumb = originalForThumb && !fs.existsSync(originalForThumb);
-      if (orphanTripDir || draftRichText || unusedRichText || orphanThumb) {
-        moved.push({ from: toPublicPath(filePath), to: path.relative(rootDir, moveToRecycle(filePath, stamp)).replace(/\\/g, '/') });
-      }
-    });
-  });
-
-  return { recycle_path: moved.length ? path.join('media_recycle', stamp).replace(/\\/g, '/') : '', moved_count: moved.length, moved };
-}
-
-router.get('/settings', (req, res) => {
-  res.json(getSettings());
-});
-
-router.put('/settings', requireAdmin, (req, res) => {
-  const current = getSettings();
-  const settings = {
-    card_max_width: clampNumber(req.body.card_max_width, 0, 800, current.card_max_width),
-    card_title_font_size: clampNumber(req.body.card_title_font_size, 0, 40, current.card_title_font_size),
-    card_meta_font_size: clampNumber(req.body.card_meta_font_size, 0, 32, current.card_meta_font_size),
-    card_scale: clampNumber(req.body.card_scale, 0.1, 1, current.card_scale),
-    map_stretch: clampNumber(req.body.map_stretch, 0.5, 2, current.map_stretch),
-    pin_size: clampNumber(req.body.pin_size, 2, 30, current.pin_size),
-    default_zoom: clampNumber(req.body.default_zoom, 0.3, 5, current.default_zoom)
-  };
-  saveSettings(settings);
-  res.json(settings);
-});
-
-router.post('/cleanup-media', requireAdmin, (req, res, next) => {
+router.get('/settings', async (req, res, next) => {
   try {
-    res.json(cleanupMediaFiles());
-  } catch (error) {
-    next(error);
-  }
+    const rows = await sql`SELECT key, value FROM settings`;
+    const settings = rows.reduce((acc, row) => ({ ...acc, [row.key]: Number(row.value) }), { ...settingDefaults });
+    res.json(settings);
+  } catch (e) { next(e); }
 });
 
-let regionsCache = null;
-router.get('/regions', (req, res, next) => {
+router.put('/settings', requireAdmin, async (req, res, next) => {
   try {
-    // 数据静态，读一次缓存到内存
-    if (!regionsCache) regionsCache = JSON.parse(fs.readFileSync(path.join(rootDir, 'regions_L1_L2.json'), 'utf8'));
-    res.json(regionsCache);
-  } catch (error) {
-    next(error);
-  }
+    const rows = await sql`SELECT key, value FROM settings`;
+    const current = rows.reduce((acc, row) => ({ ...acc, [row.key]: Number(row.value) }), { ...settingDefaults });
+    const settings = {
+      card_max_width: clampNumber(req.body.card_max_width, 0, 800, current.card_max_width),
+      card_title_font_size: clampNumber(req.body.card_title_font_size, 0, 40, current.card_title_font_size),
+      card_meta_font_size: clampNumber(req.body.card_meta_font_size, 0, 32, current.card_meta_font_size),
+      card_scale: clampNumber(req.body.card_scale, 0.1, 1, current.card_scale),
+      map_stretch: clampNumber(req.body.map_stretch, 0.5, 2, current.map_stretch),
+      pin_size: clampNumber(req.body.pin_size, 2, 30, current.pin_size),
+      default_zoom: clampNumber(req.body.default_zoom, 0.3, 5, current.default_zoom)
+    };
+    for (const [key, value] of Object.entries(settings)) {
+      await sql`INSERT INTO settings (key, value) VALUES (${key}, ${String(value)}) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`;
+    }
+    res.json(settings);
+  } catch (e) { next(e); }
 });
 
-router.get('/trips', (req, res) => {
-  const rows = db.prepare('SELECT * FROM trips ORDER BY created_at DESC').all().map(normalizeTrip);
-  res.json(rows);
+router.post('/cleanup-media', requireAdmin, async (req, res, next) => {
+  try {
+    const result = await cleanupMediaFiles();
+    res.json(result);
+  } catch (e) { next(e); }
 });
 
-router.get('/trips/:id/files', (req, res) => {
-  const dirs = pathsFor(req.params.id);
-  const album = fileList(dirs.album).map((file) => ({
-    ...file,
-    thumb: fs.existsSync(path.join(dirs.album, `thumb_${file.name}.jpg`)) ? toPublicPath(path.join(dirs.album, `thumb_${file.name}.jpg`)) : file.url
-  }));
-  res.json({
-    album,
-    attachments: fileList(dirs.attachments),
-    richtextImages: fileList(dirs.rich)
-  });
+router.get('/regions', async (req, res, next) => {
+  try {
+    if (!cachedRegions) {
+      const fs = require('fs');
+      cachedRegions = JSON.parse(fs.readFileSync(require('path').join(__dirname, '..', 'regions_L1_L2.json'), 'utf8'));
+    }
+    res.json(cachedRegions);
+  } catch (e) { next(e); }
+});
+
+router.get('/trips', async (req, res, next) => {
+  try {
+    const rows = await sql`SELECT * FROM trips ORDER BY created_at DESC`;
+    res.json(rows.map(normalizeTrip));
+  } catch (e) { next(e); }
+});
+
+router.get('/trips/:id/files', async (req, res, next) => {
+  try {
+    const prefix = req.params.id;
+    const [album, attachments, richtextImages] = await Promise.all([
+      fileList(`album/${prefix}/`),
+      fileList(`attachments/${prefix}/`),
+      fileList(`richtext_images/${prefix}/`)
+    ]);
+    res.json({ album, attachments, richtextImages });
+  } catch (e) { next(e); }
 });
 
 router.post('/trips', requireAdmin, tripFields, async (req, res, next) => {
   try {
     const now = new Date().toISOString();
-    const id = makeTripId(req.body.province, req.body.city);
+    const id = await makeTripId(req.body.province, req.body.city);
     const saved = await saveUploads(id, req.files);
-    const trip = {
-      id,
-      name: req.body.name || '',
-      province: req.body.province || '',
-      city: req.body.city || '',
-      address_detail: req.body.address_detail || '',
-      latitude: roundCoordinate(req.body.latitude),
-      longitude: roundCoordinate(req.body.longitude),
-      start_date: req.body.start_date || '',
-      end_date: req.body.end_date || '',
-      participants: req.body.participants || '',
-      rich_text_path: migrateDraftImages(id, sanitizeRichText(req.body.rich_text)),
-      album_path: saved.album_path,
-      attachments_path: saved.attachments_path,
-      cover_path: saved.cover_path || '',
-      cover_meta: saved.cover_meta ? JSON.stringify(saved.cover_meta) : '',
-      card_position_x: coordinateOrFallback(req.body.card_position_x, 104),
-      card_position_y: coordinateOrFallback(req.body.card_position_y, 35),
-      created_at: now,
-      updated_at: now
-    };
-    db.prepare(`
+    await sql`
       INSERT INTO trips (id, name, province, city, address_detail, latitude, longitude, start_date, end_date, participants, rich_text_path, album_path, attachments_path, cover_path, cover_meta, card_position_x, card_position_y, created_at, updated_at)
-      VALUES (@id, @name, @province, @city, @address_detail, @latitude, @longitude, @start_date, @end_date, @participants, @rich_text_path, @album_path, @attachments_path, @cover_path, @cover_meta, @card_position_x, @card_position_y, @created_at, @updated_at)
-    `).run(trip);
-    res.status(201).json(trip);
-  } catch (error) {
-    cleanupTemp(req.files);
-    next(error);
-  }
+      VALUES (${id}, ${req.body.name || ''}, ${req.body.province || ''}, ${req.body.city || ''}, ${req.body.address_detail || ''}, ${roundCoordinate(req.body.latitude)}, ${roundCoordinate(req.body.longitude)}, ${req.body.start_date || ''}, ${req.body.end_date || ''}, ${req.body.participants || ''}, ${req.body.rich_text || ''}, ${''}, ${''}, ${saved.cover_path || ''}, ${saved.cover_meta ? JSON.stringify(saved.cover_meta) : ''}, ${Number(req.body.card_position_x) || 104}, ${Number(req.body.card_position_y) || 35}, ${now}, ${now})
+    `;
+    const rows = await sql`SELECT * FROM trips WHERE id = ${id}`;
+    res.status(201).json(normalizeTrip(rows[0]));
+  } catch (e) { next(e); }
 });
 
 router.put('/trips/:id', requireAdmin, tripFields, async (req, res, next) => {
   try {
-    const existing = db.prepare('SELECT * FROM trips WHERE id = ?').get(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Trip not found' });
-    const saved = await saveUploads(existing.id, req.files);
-    const nextTrip = {
-      id: existing.id,
-      name: req.body.name ?? existing.name,
-      province: req.body.province ?? existing.province,
-      city: req.body.city ?? existing.city,
-      address_detail: req.body.address_detail ?? existing.address_detail,
-      latitude: req.body.latitude === undefined ? existing.latitude : roundCoordinate(req.body.latitude),
-      longitude: req.body.longitude === undefined ? existing.longitude : roundCoordinate(req.body.longitude),
-      start_date: req.body.start_date ?? existing.start_date,
-      end_date: req.body.end_date ?? existing.end_date,
-      participants: req.body.participants ?? existing.participants,
-      rich_text_path: req.body.rich_text !== undefined ? migrateDraftImages(existing.id, sanitizeRichText(req.body.rich_text)) : existing.rich_text_path,
-      album_path: saved.album_path || existing.album_path,
-      attachments_path: saved.attachments_path || existing.attachments_path,
-      cover_path: saved.cover_path || existing.cover_path,
-      cover_meta: saved.cover_meta ? JSON.stringify(saved.cover_meta) : existing.cover_meta,
-      card_position_x: req.body.card_position_x === undefined ? existing.card_position_x : coordinateOrFallback(req.body.card_position_x, existing.card_position_x),
-      card_position_y: req.body.card_position_y === undefined ? existing.card_position_y : coordinateOrFallback(req.body.card_position_y, existing.card_position_y),
-      updated_at: new Date().toISOString()
-    };
-    db.prepare(`
-      UPDATE trips SET name=@name, province=@province, city=@city, address_detail=@address_detail, latitude=@latitude, longitude=@longitude, start_date=@start_date, end_date=@end_date, participants=@participants, rich_text_path=@rich_text_path, album_path=@album_path, attachments_path=@attachments_path, cover_path=@cover_path, cover_meta=@cover_meta, card_position_x=@card_position_x, card_position_y=@card_position_y, updated_at=@updated_at
-      WHERE id=@id
-    `).run(nextTrip);
-    res.json(nextTrip);
-  } catch (error) {
-    cleanupTemp(req.files);
-    next(error);
-  }
+    const existing = await sql`SELECT * FROM trips WHERE id = ${req.params.id}`;
+    if (!existing.length) return res.status(404).json({ error: 'Trip not found' });
+    const cur = existing[0];
+    const saved = await saveUploads(req.params.id, req.files);
+    await sql`
+      UPDATE trips SET
+        name = ${req.body.name ?? cur.name},
+        province = ${req.body.province ?? cur.province},
+        city = ${req.body.city ?? cur.city},
+        address_detail = ${req.body.address_detail ?? cur.address_detail},
+        latitude = ${req.body.latitude === undefined ? cur.latitude : roundCoordinate(req.body.latitude)},
+        longitude = ${req.body.longitude === undefined ? cur.longitude : roundCoordinate(req.body.longitude)},
+        start_date = ${req.body.start_date ?? cur.start_date},
+        end_date = ${req.body.end_date ?? cur.end_date},
+        participants = ${req.body.participants ?? cur.participants},
+        rich_text_path = ${req.body.rich_text ?? cur.rich_text_path},
+        album_path = ${cur.album_path},
+        attachments_path = ${cur.attachments_path},
+        cover_path = ${saved.cover_path || cur.cover_path},
+        cover_meta = ${saved.cover_meta ? JSON.stringify(saved.cover_meta) : cur.cover_meta},
+        card_position_x = ${req.body.card_position_x === undefined ? cur.card_position_x : Number(req.body.card_position_x)},
+        card_position_y = ${req.body.card_position_y === undefined ? cur.card_position_y : Number(req.body.card_position_y)},
+        updated_at = ${new Date().toISOString()}
+      WHERE id = ${req.params.id}
+    `;
+    const rows = await sql`SELECT * FROM trips WHERE id = ${req.params.id}`;
+    res.json(normalizeTrip(rows[0]));
+  } catch (e) { next(e); }
 });
 
-router.delete('/trips/:id/files', requireAdmin, (req, res, next) => {
+router.delete('/trips/:id/files', requireAdmin, async (req, res, next) => {
   try {
-    const existing = db.prepare('SELECT id FROM trips WHERE id = ?').get(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Trip not found' });
     const type = req.query.type;
     const name = req.query.name;
     if (!type || !name || !['album', 'attachments'].includes(type)) {
       return res.status(400).json({ error: 'Invalid type or name' });
     }
-    const dirs = pathsFor(existing.id);
-    const filePath = path.join(dirs[type], safeName(name));
-    const thumbPath = type === 'album' ? path.join(dirs.album, `thumb_${safeName(name)}.jpg`) : null;
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    if (thumbPath && fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath);
+    const blobName = `${type}/${req.params.id}/${safeName(name)}`;
+    const thumbName = type === 'album' ? `${type}/${req.params.id}/thumb_${safeName(name)}.jpg` : null;
+    try { await del(blobName); } catch { /* already deleted */ }
+    if (thumbName) {
+      try { await del(thumbName); } catch { /* no thumb */ }
+    }
     res.status(204).end();
-  } catch (error) {
-    next(error);
-  }
+  } catch (e) { next(e); }
 });
 
-router.delete('/trips/:id', requireAdmin, (req, res, next) => {
+router.delete('/trips/:id', requireAdmin, async (req, res, next) => {
   try {
-    const existing = db.prepare('SELECT * FROM trips WHERE id = ?').get(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Trip not found' });
-    db.prepare('DELETE FROM trips WHERE id = ?').run(req.params.id);
-    // 与清理策略一致：媒体目录移入回收站，不直接物理删除
-    const stamp = timestampName();
-    const dirs = pathsFor(req.params.id);
-    Object.values(dirs).forEach((dir) => {
-      if (fs.existsSync(dir)) moveToRecycle(dir, stamp);
-    });
+    const rows = await sql`SELECT id FROM trips WHERE id = ${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Trip not found' });
+    await sql`DELETE FROM trips WHERE id = ${req.params.id}`;
+    await Promise.all([
+      deleteBlobsByPrefix(`album/${req.params.id}/`),
+      deleteBlobsByPrefix(`attachments/${req.params.id}/`),
+      deleteBlobsByPrefix(`richtext_images/${req.params.id}/`)
+    ]);
     res.status(204).end();
-  } catch (error) {
-    next(error);
-  }
+  } catch (e) { next(e); }
 });
 
-router.post('/trips/:id/files', requireAdmin, upload.fields([{ name: 'album', maxCount: 100 }, { name: 'attachments', maxCount: 100 }]), async (req, res, next) => {
+router.post('/trips/:id/files', requireAdmin, upload.fields([
+  { name: 'album', maxCount: 100 },
+  { name: 'attachments', maxCount: 100 }
+]), async (req, res, next) => {
   try {
-    const existing = db.prepare('SELECT id, album_path, attachments_path FROM trips WHERE id = ?').get(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Trip not found' });
+    const rows = await sql`SELECT id FROM trips WHERE id = ${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Trip not found' });
     if (!req.files || (!req.files.album?.length && !req.files.attachments?.length)) {
       return res.status(400).json({ error: 'No files provided' });
     }
-    const saved = await saveUploads(existing.id, req.files);
-    const updates = {};
-    if (req.files.album?.length) updates.album_path = saved.album_path;
-    if (req.files.attachments?.length) updates.attachments_path = saved.attachments_path;
-    if (Object.keys(updates).length) {
-      const pairs = Object.entries(updates);
-      const sql = `UPDATE trips SET ${pairs.map(([key]) => `${key}=?`).join(', ')} WHERE id=?`;
-      db.prepare(sql).run(...pairs.map(([, value]) => value), existing.id);
-    }
-    res.json({ ...saved, id: existing.id });
-  } catch (error) {
-    cleanupTemp(req.files);
-    next(error);
-  }
+    const saved = await saveUploads(req.params.id, req.files);
+    res.json({ ...saved, id: req.params.id });
+  } catch (e) { next(e); }
 });
 
-router.post('/uploads/richtext', requireAdmin, upload.single('image'), (req, res, next) => {
+router.post('/uploads/richtext', requireAdmin, upload.single('image'), async (req, res, next) => {
   try {
     const id = req.body.id || 'draft';
-    const dir = path.join(mediaDir, 'richtext_images', safeName(id));
-    ensureDir(dir);
-    const target = path.join(dir, `${Date.now()}_${safeName(req.file.originalname)}`);
-    fs.renameSync(req.file.path, target);
-    res.json({ url: toPublicPath(target) });
-  } catch (error) {
-    if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-    next(error);
-  }
+    const blob = await put(`richtext_images/${safeName(id)}/${Date.now()}_${safeName(req.file.originalname)}`, req.file.buffer, {
+      access: 'public',
+      contentType: req.file.mimetype
+    });
+    res.json({ url: blob.url });
+  } catch (e) { next(e); }
 });
 
-router.get('/participants', (req, res) => {
-  const rows = db.prepare('SELECT * FROM participants ORDER BY count DESC').all();
-  res.json(rows);
-});
-
-// 解析参与次数：非法输入返回 null（由调用方决定报错或回退）
-function parseCount(value) {
-  if (value === undefined || value === '') return null;
-  const number = parseInt(value, 10);
-  return Number.isFinite(number) && number >= 0 ? number : null;
-}
-
-router.post('/participants/batch', requireAdmin, (req, res, next) => {
+router.get('/participants', async (req, res, next) => {
   try {
-    const names = [...new Set((req.body.names || []).map((n) => String(n).trim()).filter(Boolean))];
+    const rows = await sql`SELECT * FROM participants ORDER BY count DESC`;
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
+router.post('/participants/batch', requireAdmin, async (req, res, next) => {
+  try {
+    const names = [...new Set((req.body.names || []).map(n => String(n).trim()).filter(Boolean))];
     if (!names.length) return res.json({ processed: 0 });
     const now = new Date().toISOString();
-    const upsert = db.prepare(`
-      INSERT INTO participants (name, last_participated_at, count)
-      VALUES (?, ?, 1)
-      ON CONFLICT(name) DO UPDATE SET
-        last_participated_at = excluded.last_participated_at,
-        count = count + 1
-    `);
-    // 事务保证批量写入的原子性
-    db.exec('BEGIN');
-    try {
-      for (const name of names) {
-        upsert.run(name, now);
-      }
-      db.exec('COMMIT');
-    } catch (txError) {
-      db.exec('ROLLBACK');
-      throw txError;
+    for (const name of names) {
+      await sql`
+        INSERT INTO participants (name, last_participated_at, count)
+        VALUES (${name}, ${now}, 1)
+        ON CONFLICT (name) DO UPDATE SET
+          last_participated_at = EXCLUDED.last_participated_at,
+          count = participants.count + 1
+      `;
     }
     res.json({ processed: names.length });
-  } catch (error) {
-    next(error);
-  }
+  } catch (e) { next(e); }
 });
 
-router.post('/participants', requireAdmin, (req, res, next) => {
+router.post('/participants', requireAdmin, async (req, res, next) => {
   try {
     const name = String(req.body.name || '').trim();
     if (!name) return res.status(400).json({ error: 'Name is required' });
-    const existing = db.prepare('SELECT id FROM participants WHERE name = ?').get(name);
-    if (existing) return res.status(409).json({ error: 'Participant already exists' });
+    const existing = await sql`SELECT id FROM participants WHERE name = ${name}`;
+    if (existing.length) return res.status(409).json({ error: 'Participant already exists' });
     const lastParticipatedAt = req.body.last_participated_at || new Date().toISOString();
-    const count = parseCount(req.body.count);
-    if (count === null) return res.status(400).json({ error: 'Invalid count' });
-    db.prepare('INSERT INTO participants (name, last_participated_at, count) VALUES (?, ?, ?)').run(name, lastParticipatedAt, count);
-    const row = db.prepare('SELECT * FROM participants WHERE rowid = last_insert_rowid()').get();
-    res.status(201).json(row);
-  } catch (error) {
-    next(error);
-  }
+    const count = req.body.count === undefined || req.body.count === '' ? 0 : parseInt(req.body.count);
+    const rows = await sql`
+      INSERT INTO participants (name, last_participated_at, count)
+      VALUES (${name}, ${lastParticipatedAt}, ${count})
+      RETURNING *
+    `;
+    res.status(201).json(rows[0]);
+  } catch (e) { next(e); }
 });
 
-router.put('/participants/:id', requireAdmin, (req, res, next) => {
+router.put('/participants/:id', requireAdmin, async (req, res, next) => {
   try {
-    const existing = db.prepare('SELECT * FROM participants WHERE id = ?').get(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Not found' });
-    const name = String(req.body.name ?? existing.name).trim();
-    const lastParticipatedAt = req.body.last_participated_at || existing.last_participated_at;
-    // 未传 count 时保留现值；传了但非法则报错
-    const count = req.body.count === undefined || req.body.count === '' ? existing.count : parseCount(req.body.count);
-    if (count === null) return res.status(400).json({ error: 'Invalid count' });
-    db.prepare('UPDATE participants SET name=?, last_participated_at=?, count=? WHERE id=?').run(name, lastParticipatedAt, count, req.params.id);
-    const row = db.prepare('SELECT * FROM participants WHERE id = ?').get(req.params.id);
-    res.json(row);
-  } catch (error) {
-    next(error);
-  }
+    const existing = await sql`SELECT * FROM participants WHERE id = ${req.params.id}`;
+    if (!existing.length) return res.status(404).json({ error: 'Not found' });
+    const cur = existing[0];
+    const name = String(req.body.name ?? cur.name).trim();
+    const lastParticipatedAt = req.body.last_participated_at || cur.last_participated_at;
+    const count = req.body.count === undefined || req.body.count === '' ? cur.count : parseInt(req.body.count);
+    const rows = await sql`
+      UPDATE participants SET name = ${name}, last_participated_at = ${lastParticipatedAt}, count = ${count}
+      WHERE id = ${req.params.id}
+      RETURNING *
+    `;
+    res.json(rows[0]);
+  } catch (e) { next(e); }
 });
 
-router.delete('/participants/:id', requireAdmin, (req, res, next) => {
+router.delete('/participants/:id', requireAdmin, async (req, res, next) => {
   try {
-    const existing = db.prepare('SELECT * FROM participants WHERE id = ?').get(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Not found' });
-    db.prepare('DELETE FROM participants WHERE id = ?').run(req.params.id);
+    const rows = await sql`SELECT id FROM participants WHERE id = ${req.params.id}`;
+    if (!rows.length) return res.status(404).json({ error: 'Not found' });
+    await sql`DELETE FROM participants WHERE id = ${req.params.id}`;
     res.status(204).end();
-  } catch (error) {
-    next(error);
-  }
+  } catch (e) { next(e); }
 });
 
 module.exports = router;

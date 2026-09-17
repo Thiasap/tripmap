@@ -1,16 +1,12 @@
-// 校验管理员身份；非 admin 跳转登录页并返回 false，调用方据此中断后续逻辑
 async function checkSettingsAuth() {
   try {
     const res = await fetch('/api/auth/status');
     const data = await res.json();
     if (data.role !== 'admin') {
       window.location.href = '/login.html?redirect=/settings.html';
-      return false;
     }
-    return true;
   } catch {
     window.location.href = '/login.html?redirect=/settings.html';
-    return false;
   }
 }
 
@@ -65,8 +61,9 @@ logoutBtn.addEventListener('click', async () => {
   await fetch('/api/logout', { method: 'POST' });
   window.location.href = '/';
 });
-form.addEventListener('submit', (event) => saveSettings(event).catch(reportError));
+form.addEventListener('submit', (event) => saveSettings(event).catch((error) => alert(error.message)));
 cleanupBtn.addEventListener('click', cleanupMedia);
+loadSettings().catch((error) => alert(error.message));
 
 const participantTableBody = document.querySelector('#participantTableBody');
 const participantPagination = document.querySelector('#participantPagination');
@@ -221,9 +218,11 @@ participantSearch.addEventListener('keydown', (event) => {
   }
 });
 
-// 鉴权通过后再加载数据（loadSettings 只在此处调用一次）
-checkSettingsAuth().then((ok) => {
-  if (!ok) return;
+checkSettingsAuth().then(() => {
   loadParticipants();
-  loadSettings().catch(reportError);
+  loadSettings().catch((error) => alert(error.message));
 });
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]));
+}

@@ -20,6 +20,11 @@ yarn-debug.log*
 dist/
 media/
 media_recycle*/
-.claude/worktrees/
+.claude/
+.agent/
 /tripmap.sqlite*
 .workbuddy/
+
+# 备份产物（本地/离线，禁止提交）
+/backups/
+

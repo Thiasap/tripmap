@@ -1,25 +1,26 @@
 {
   "name": "tripmap",
   "version": "1.0.0",
-  "description": "本地单用户旅行地图",
-  "main": "server/app.js",
-  "private": true,
-  "engines": {
-    "node": ">=22.5"
-  },
+  "description": "旅行地图",
   "scripts": {
-    "start": "node server/app.js"
+    "start": "node server/app.js",
+    "dev": "vercel dev",
+    "vercel-build": "node scripts/copy-vendor.js"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^0.10.0",
+    "@vercel/blob": "^0.23.0",
     "d3": "^7.9.0",
     "express": "^4.21.2",
-    "express-session": "^1.19.0",
     "glightbox": "^3.3.1",
     "helmet": "^8.1.0",
     "html2canvas": "^1.4.1",
+    "jsonwebtoken": "^9.0.0",
     "multer": "^2.1.1",
     "quill": "^2.0.3",
-    "sanitize-html": "^2.17.4",
     "sharp": "^0.34.5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["sharp", "bufferutil"]
   }
 }

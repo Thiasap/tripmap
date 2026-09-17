@@ -50,8 +50,6 @@ const participantsHidden = form.elements.participants;
 let pendingAlbumFiles = [];
 let pendingAttachmentFiles = [];
 let pendingDeletions = [];
-let initialParticipants = []; // 打开表单时的名单，保存时只把新增人员提交给 batch 接口
-const pendingObjectUrls = []; // 预览用 ObjectURL，重建预览时统一释放
 const GUEST_CACHE_KEY = 'tripmap_guest';
 const settingsBtn = document.querySelector('#settingsBtn');
 const cardScaleRange = document.querySelector('#cardScaleRange');
@@ -108,17 +106,6 @@ function hideTripDialog() {
   pendingDeletions = [];
   pendingAlbumFiles = [];
   pendingAttachmentFiles = [];
-  releaseObjectUrls();
-}
-
-function releaseObjectUrls() {
-  while (pendingObjectUrls.length) URL.revokeObjectURL(pendingObjectUrls.pop());
-}
-
-function createObjectUrl(file) {
-  const url = URL.createObjectURL(file);
-  pendingObjectUrls.push(url);
-  return url;
 }
 
 async function loadRegions() {
@@ -414,11 +401,7 @@ function autoDetectCoord() {
   else if (isLng(a) && isLat(b)) { lat = b; lng = a; }
   else if (isLat(a)) { lat = a; lng = b; }
   else if (isLng(a)) { lng = a; lat = b; }
-  else {
-    // 无法判定顺序时不做猜测，避免静默填反
-    alert('无法识别经纬度，请检查格式（示例：39.9, 116.4）');
-    return;
-  }
+  else { lat = a; lng = b; }
   form.elements.latitude.value = Number(lat).toFixed(4);
   form.elements.longitude.value = Number(lng).toFixed(4);
 }
@@ -601,12 +584,7 @@ function makeCardDraggable(card, trip) {
         const fd = new FormData();
         fd.append('card_position_x', trip.card_position_x);
         fd.append('card_position_y', trip.card_position_y);
-        try {
-          const res = await fetch(`/api/trips/${trip.id}`, { method: 'PUT', body: fd });
-          if (!res.ok) throw new Error(await res.text());
-        } catch (error) {
-          reportError(error);
-        }
+        await fetch(`/api/trips/${trip.id}`, { method: 'PUT', body: fd });
       }
       if (state.role === 'guest') saveGuestCache();
     }
@@ -622,7 +600,6 @@ function openAdd() {
   form.elements.id.value = '';
   quill.setContents([]);
   pendingDeletions = [];
-  initialParticipants = [];
   resetMediaPreviews();
   participantState.selected = [];
   renderTags();
@@ -647,7 +624,6 @@ async function openDetail(id) {
   });
   const names = trip.participants ? trip.participants.split(',').map((s) => s.trim()).filter(Boolean) : [];
   participantState.selected = [...names];
-  initialParticipants = [...names];
   names.forEach((name) => {
     if (!participantState.all.some((p) => p.name === name)) {
       participantState.all.push({ id: null, name, count: 0, last_participated_at: '' });
@@ -701,7 +677,7 @@ async function renderFiles(id) {
       ).join('') || '<li>暂无附件</li>'}</ul>
     </div>
   `;
-  setupLightbox(albumFiles);
+  setupLightbox(files);
   if (state.editing) {
     const addAlbumBtn = filesPanel.querySelector('#addAlbumBtn');
     const addAttachmentBtn = filesPanel.querySelector('#addAttachmentBtn');
@@ -712,10 +688,9 @@ async function renderFiles(id) {
   }
 }
 
-function setupLightbox(albumFiles) {
+function setupLightbox(files) {
   if (lightbox) lightbox.destroy();
-  // 使用与缩略图网格相同的（过滤掉待删除项后的）列表，保证 data-index 对得上
-  const elements = albumFiles.map((file) => ({ href: file.url, type: 'image' }));
+  const elements = files.album.map((file) => ({ href: file.url, type: 'image' }));
   lightbox = GLightbox({ elements });
   filesPanel.querySelectorAll('.glightbox').forEach((link) => {
      link.addEventListener('click', (event) => {
@@ -729,13 +704,9 @@ async function handleAlbumUpload(id) {
   const files = hiddenAlbumInput.files;
   if (!files.length) return;
   if (id) {
-    try {
-      await uploadFiles(id, 'album', files);
-      hiddenAlbumInput.value = '';
-      await renderFiles(id);
-    } catch (error) {
-      reportError(error);
-    }
+    await uploadFiles(id, 'album', files);
+    hiddenAlbumInput.value = '';
+    await renderFiles(id);
   } else {
     pendingAlbumFiles.push(...files);
     previewPendingAlbum();
@@ -747,13 +718,9 @@ async function handleAttachmentUpload(id) {
   const files = hiddenAttachmentInput.files;
   if (!files.length) return;
   if (id) {
-    try {
-      await uploadFiles(id, 'attachments', files);
-      hiddenAttachmentInput.value = '';
-      await renderFiles(id);
-    } catch (error) {
-      reportError(error);
-    }
+    await uploadFiles(id, 'attachments', files);
+    hiddenAttachmentInput.value = '';
+    await renderFiles(id);
   } else {
     pendingAttachmentFiles.push(...files);
     previewPendingAttachments();
@@ -774,9 +741,8 @@ function removePendingAttachment(index) {
 function previewPendingAlbum() {
   const grid = filesPanel.querySelector('.album-grid');
   if (grid) {
-    releaseObjectUrls();
     grid.innerHTML = pendingAlbumFiles.map((file, i) => {
-      const url = createObjectUrl(file);
+      const url = URL.createObjectURL(file);
       return `<div class="album-tile"><img src="${url}" alt="${escapeHtml(file.name)}" style="width:100%;height:100%;object-fit:contain;"><button class="delete-btn" data-pending="album" data-index="${i}">&times;</button></div>`;
     }).join('') || '<span class="empty-text">暂无图片</span>';
   }
@@ -812,15 +778,12 @@ async function submitForm(event) {
   const method = id ? 'PUT' : 'POST';
   const res = await fetch(url, { method, body: fd });
   if (!res.ok) throw new Error(await res.text());
-  // 只把本次新增的人员提交 batch，避免反复编辑虚增参与次数
-  const newNames = participantState.selected.filter((name) => !initialParticipants.includes(name));
-  if (newNames.length) {
-    const batchRes = await fetch('/api/participants/batch', {
+  if (participantState.selected.length) {
+    await fetch('/api/participants/batch', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ names: newNames })
+      body: JSON.stringify({ names: participantState.selected })
     });
-    if (!batchRes.ok) throw new Error(await batchRes.text());
   }
   const savedId = id || (await res.json()).id;
   for (const del of pendingDeletions) {
@@ -834,8 +797,7 @@ async function submitForm(event) {
 async function deleteSelected() {
   if (!state.selected) return;
   if (!confirm(`删除“${state.selected.name}”？此操作会删除对应媒体文件。`)) return;
-  const res = await fetch(`/api/trips/${state.selected.id}`, { method: 'DELETE' });
-  if (!res.ok) throw new Error(await res.text());
+  await fetch(`/api/trips/${state.selected.id}`, { method: 'DELETE' });
   hideTripDialog();
   await loadTrips();
 }
@@ -845,7 +807,6 @@ async function insertEditorImage(file) {
   fd.append('image', file);
   fd.append('id', form.elements.id.value || 'draft');
   const res = await fetch('/api/uploads/richtext', { method: 'POST', body: fd });
-  if (!res.ok) throw new Error(await res.text());
   const data = await res.json();
   const range = quill.getSelection(true);
   quill.insertEmbed(range.index, 'image', data.url);
@@ -864,7 +825,7 @@ function initEditor() {
     input.type = 'file';
     input.accept = 'image/*';
     input.onchange = () => {
-      if (input.files[0]) insertEditorImage(input.files[0]).catch(reportError);
+      if (input.files[0]) insertEditorImage(input.files[0]);
     };
     input.click();
   });
@@ -915,13 +876,16 @@ function resetMediaPreviews() {
 function previewCoverFile() {
   const file = coverInput.files[0];
   if (!file) return;
-  releaseObjectUrls();
-  const url = createObjectUrl(file);
+  const url = URL.createObjectURL(file);
   const image = new Image();
   image.onload = () => {
     renderCoverPreview(url, { width: image.naturalWidth, height: image.naturalHeight });
   };
   image.src = url;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]));
 }
 
 function syncParticipantHidden() {
@@ -932,11 +896,20 @@ async function loadParticipants() {
   try {
     const res = await fetch('/api/participants');
     if (res.ok) {
-      participantState.all = await res.json();
-      return;
+      const data = await res.json();
+      if (data.length) {
+        participantState.all = data;
+        return;
+      }
     }
-  } catch { /* 加载失败按空数据处理 */ }
-  participantState.all = [];
+  } catch { /* use mock */ }
+  const names = ['张三', '李四', '王五', '赵六', '孙七', '周八', '吴九', '郑十', '钱十一', '陈十二'];
+  participantState.all = names.map((name) => ({
+    id: null,
+    name,
+    count: Math.floor(Math.random() * 10) + 1,
+    last_participated_at: new Date(Date.now() - Math.random() * 365 * 24 * 60 * 60 * 1000).toISOString()
+  })).sort((a, b) => b.count - a.count);
 }
 
 function renderTags() {
@@ -1057,15 +1030,13 @@ document.querySelector('#addTripBtn').addEventListener('click', openAdd);
 document.querySelector('#resetGuestBtn').addEventListener('click', () => {
   if (confirm('重置将清空所有本地缓存的卡片位置和缩放设置，确定？')) clearGuestCache();
 });
-// settingsBtn 的跳转统一由 applyRole() 按角色设置，这里不再重复绑定
+settingsBtn.addEventListener('click', () => { window.location.href = '/settings.html'; });
 pickCoordinateBtn.addEventListener('click', beginCoordinatePick);
 autoDetectCoordBtn.addEventListener('click', autoDetectCoord);
 form.elements.province.addEventListener('input', updateCityOptions);
 form.elements.start_date.addEventListener('change', () => {
+  if (!form.elements.end_date.value) form.elements.end_date.showPicker();
   swapDatesIfNeeded();
-  if (!form.elements.end_date.value && typeof form.elements.end_date.showPicker === 'function') {
-    try { form.elements.end_date.showPicker(); } catch { /* 浏览器拒绝弹出时忽略 */ }
-  }
 });
 form.elements.end_date.addEventListener('change', swapDatesIfNeeded);
 function swapDatesIfNeeded() {
@@ -1090,13 +1061,13 @@ cardScaleRange.addEventListener('change', () => {
   if (state.role === 'guest') { saveGuestCache(); return; }
   saveSettings({ card_scale: Number(cardScaleRange.value) / 100 }).catch((error) => alert(error.message));
 });
-form.addEventListener('submit', (event) => submitForm(event).catch(reportError));
+form.addEventListener('submit', submitForm);
 closeBtn.addEventListener('click', hideTripDialog);
 editBtn.addEventListener('click', () => {
   setFormEnabled(true);
   if (state.selected) renderFiles(state.selected.id);
 });
-deleteBtn.addEventListener('click', () => deleteSelected().catch(reportError));
+deleteBtn.addEventListener('click', deleteSelected);
 coverInput.addEventListener('change', previewCoverFile);
 filesPanel.addEventListener('click', async (event) => {
   const btn = event.target.closest('.delete-btn');
@@ -1117,12 +1088,7 @@ filesPanel.addEventListener('click', async (event) => {
     renderFiles(state.selected.id);
   }
 });
-// 窗口尺寸变化后重载以重建投影；防抖避免拖动窗口时连续刷新
-let resizeReloadTimer = null;
-window.addEventListener('resize', () => {
-  clearTimeout(resizeReloadTimer);
-  resizeReloadTimer = setTimeout(() => location.reload(), 600);
-});
+window.addEventListener('resize', () => location.reload());
 
 // 导出地图
 document.querySelector('#exportBtn').addEventListener('click', () => {
@@ -1142,8 +1108,8 @@ exportDoBtn.addEventListener('click', async () => {
     const canvas = await html2canvas(mapWrap, {
       scale,
       useCORS: true,
-      // JPEG 不支持透明，透明区域会变黑底；PNG 保持透明，JPEG 铺白底
-      backgroundColor: format === 'image/jpeg' ? '#ffffff' : null,
+      allowTaint: true,
+      backgroundColor: null,
       onclone: (clonedDoc) => {
         // 在克隆文档中移除卡片 transform 并等比补偿宽高/字号/圆角，避免 html2canvas 扭曲 border-radius
         const origCards = document.querySelectorAll('.trip-card');
