@@ -1,0 +1,26 @@
+# 不随部署上传的内容
+# 说明：提交到 Git 的文件仍会部署；此文件用于排除「本地存在但不应上线」的文件。
+# 最关键的是 config.json——它含管理员密码与 JWT 密钥，一旦上传就会随部署产物留存。
+
+config.json
+config.json.example
+
+# 本地备份产物（体积大且含个人数据）
+backups/
+media/
+media_recycle*/
+
+# 恢复演练与本地工作目录
+.restore-test/
+.dr-drill/
+.agent/
+.workbuddy/
+.claude/
+
+# 本地数据库
+tripmap.sqlite
+tripmap.sqlite-shm
+tripmap.sqlite-wal
+
+# 测试与工具（线上运行不需要）
+tools/test/

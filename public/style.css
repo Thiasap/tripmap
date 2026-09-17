@@ -72,7 +72,6 @@ button, .upload-inline {
   stroke-width: 1px;
 }
 .pin { fill: #e11d48; stroke: #fff; stroke-width: 2; pointer-events: auto; }
-.pin-label { fill: #0f172a; font-size: 12px; paint-order: stroke; stroke: white; stroke-width: 3; }
 .cards-layer { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
 .trip-card {
   position: absolute;
@@ -174,12 +173,11 @@ button, .upload-inline {
 .dialog-head { display: flex; justify-content: space-between; gap: 20px; align-items: center; margin-bottom: 18px; }
 .dialog-head h2 { margin: 0; color: #0f172a; font-size: 18px; font-weight: 700; }
 .dialog-actions { display: flex; gap: 8px; }
-.form-grid, .upload-grid {
+.form-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 12px;
 }
-.upload-grid { grid-template-columns: repeat(3, 1fr); margin-top: 14px; }
 label { display: flex; flex-direction: column; gap: 6px; color: #334155; font-size: 13px; font-weight: 700; }
 label.wide { grid-column: 1 / span 2; }
 label.wide-row { grid-column: 1 / -1; }
@@ -191,7 +189,7 @@ label.wide-row { grid-column: 1 / -1; }
 .coord-inline input, .date-inline input { flex: 1; min-width: 0; }
 .coord-inline button { flex-shrink: 0; white-space: nowrap; }
 .date-inline span { color: #94a3b8; font-weight: 400; flex-shrink: 0; }
-input, .coordinate-picker-field button {
+input {
   border: 1px solid #cbd5e1;
   border-radius: 10px;
   padding: 9px 10px;
@@ -236,7 +234,6 @@ input, .coordinate-picker-field button {
   border: 1px solid #dbe3ee;
   background: #f8fafc;
 }
-.coordinate-picker-field button { width: max-content; background: #e2e8f0; color: #1e293b; font-weight: 700; }
 .album-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(86px, 86px)); gap: 10px; }
 .album-tile {
   position: relative;

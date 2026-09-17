@@ -1,22 +1,35 @@
 const express = require('express');
 const path = require('path');
 const helmet = require('helmet');
-const jwt = require('jsonwebtoken');
 const { initDB } = require('./db');
 const routes = require('./routes');
+const {
+  passwordMatches,
+  registerFailedLogin,
+  isBlocked,
+  clearLoginAttempts,
+  issueToken,
+  verifyToken
+} = require('./auth');
 
 const app = express();
 const port = process.env.PORT || 3002;
 const rootDir = path.join(__dirname, '..');
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || (function () {
-  try { return require(path.join(rootDir, 'config.json')).ADMIN_PASSWORD; } catch { return 'admin'; }
-})();
-const JWT_SECRET = process.env.SESSION_SECRET || (function () {
-  try { return require(path.join(rootDir, 'config.json')).SESSION_SECRET; } catch { return `tripmap_${Math.random().toString(36).slice(2)}`; }
-})();
 
+// 本地 dev 全链路走 HTTP，Secure Cookie 会被浏览器丢弃，因此固定 false；
+// 线上 api/index.js 按 NODE_ENV=production 自动开启 secure。
 app.use(helmet({
-  contentSecurityPolicy: false,
+  contentSecurityPolicy: {
+    useDefaults: true,
+    directives: {
+      'upgrade-insecure-requests': null,
+      'script-src': ["'self'"],
+      'style-src': ["'self'", "'unsafe-inline'"],
+      'img-src': ["'self'", 'data:', 'blob:', 'https://*.public.blob.vercel-storage.com'],
+      'font-src': ["'self'", 'data:'],
+      'connect-src': ["'self'"]
+    }
+  },
   crossOriginEmbedderPolicy: false
 }));
 
@@ -39,13 +52,18 @@ app.use('/vendor/quill', express.static(path.join(rootDir, 'node_modules', 'quil
 app.use('/vendor/glightbox', express.static(path.join(rootDir, 'node_modules', 'glightbox', 'dist')));
 app.use('/vendor/html2canvas', express.static(path.join(rootDir, 'node_modules', 'html2canvas', 'dist')));
 
-// Login
+// Login（带登录限速与常数时间比较）
 app.post('/api/login', (req, res) => {
-  if (String(req.body.password || '') !== ADMIN_PASSWORD) {
+  const ip = req.ip || 'unknown';
+  if (isBlocked(ip)) {
+    return res.status(429).json({ error: '尝试次数过多，请稍后再试' });
+  }
+  if (!passwordMatches(req.body.password)) {
+    registerFailedLogin(ip);
     return res.status(403).json({ error: '密码错误' });
   }
-  const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '24h' });
-  res.cookie('token', token, {
+  clearLoginAttempts(ip);
+  res.cookie('token', issueToken(), {
     httpOnly: true,
     sameSite: 'lax',
     secure: false,
@@ -61,13 +79,8 @@ app.post('/api/logout', (req, res) => {
 
 app.get('/api/auth/status', (req, res) => {
   const token = req.cookies?.token;
-  if (!token) return res.json({ role: 'guest' });
-  try {
-    jwt.verify(token, JWT_SECRET);
-    res.json({ role: 'admin' });
-  } catch {
-    res.json({ role: 'guest' });
-  }
+  if (!token || !verifyToken(token)) return res.json({ role: 'guest' });
+  res.json({ role: 'admin' });
 });
 
 app.use('/api', routes);

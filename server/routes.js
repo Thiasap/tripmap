@@ -2,14 +2,15 @@ const express = require('express');
 const path = require('path');
 const multer = require('multer');
 const sharp = require('sharp');
+const sanitizeHtml = require('sanitize-html');
 const { put, del, list } = require('@vercel/blob');
 const jwt = require('jsonwebtoken');
 const { sql } = require('./db');
+const { JWT_SECRET } = require('./auth');
 
 const router = express.Router();
 
 let cachedRegions = null;
-const JWT_SECRET = process.env.SESSION_SECRET || 'tripmap_default_secret';
 
 function requireAdmin(req, res, next) {
   const token = req.cookies?.token;
@@ -20,6 +21,18 @@ function requireAdmin(req, res, next) {
   } catch {
     return res.status(401).json({ error: '登录已过期' });
   }
+}
+
+// 富文本净化：与本地版保持同一策略，禁止 script/onerror 与协议相对 URL
+const richTextAllowed = {
+  allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img', 'h1', 'h2', 'u', 's']),
+  allowedAttributes: { ...sanitizeHtml.defaults.allowedAttributes, img: ['src', 'alt'] },
+  allowedSchemes: ['http', 'https'],
+  allowProtocolRelative: false
+};
+function sanitizeRichText(html) {
+  if (!html || typeof html !== 'string') return '';
+  return sanitizeHtml(html, richTextAllowed);
 }
 
 const settingDefaults = {
@@ -155,12 +168,12 @@ async function fileList(prefix) {
     for (const blob of blobs) {
       const name = blob.pathname.split('/').pop();
       if (name.startsWith('thumb_') || name.startsWith('cover_')) continue;
-      const entry = { name, url: blob.url };
+      const entry = { name, url: blob.url, thumb: blob.url };
       const thumbPath = blob.pathname.replace(new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`), `thumb_${name}.jpg`);
       try {
         const { blobs: thumbs } = await list({ prefix: thumbPath, limit: 1 });
         if (thumbs.length) entry.thumb = thumbs[0].url;
-      } catch { /* no thumb */ }
+      } catch { /* 无缩略图时回退到原图，前端直接使用 thumb 字段 */ }
       result.push(entry);
     }
     return result;
@@ -171,47 +184,58 @@ async function fileList(prefix) {
 
 async function deleteBlobsByPrefix(prefix) {
   try {
-    const { blobs } = await list({ prefix, limit: 1000 });
-    await Promise.all(blobs.map(b => del(b.url)));
-  } catch { /* ignore */ }
+    const blobs = await listAllByPrefix(prefix);
+    const urls = blobs.map((b) => b.url).filter(Boolean);
+    if (urls.length) await del(urls);
+  } catch { /* 对象可能已被删除 */ }
+}
+
+/** 分页列出某个 prefix 下的全部对象（单次 list 上限 1000，必须翻页） */
+async function listAllByPrefix(prefix) {
+  const all = [];
+  let cursor = null;
+  let pages = 0;
+  do {
+    const page = await list({ prefix, limit: 1000, ...(cursor ? { cursor } : {}) });
+    all.push(...(page.blobs || []));
+    cursor = page.cursor || null;
+    pages += 1;
+    if (pages > 200) break; // 防御游标未推进导致的死循环
+  } while (cursor);
+  return all;
 }
 
 async function cleanupMediaFiles() {
   const trips = await sql`SELECT id FROM trips`;
   const tripIds = new Set(trips.map(t => t.id));
-  const prefixMap = {
-    album: [],
-    richtext_images: [],
-    attachments: []
-  };
 
-  // Collect all blobs grouped by prefix type
-  for (const prefix of ['album', 'richtext_images', 'attachments']) {
+  // 收集所有媒体对象，按 tripId 归组
+  const byTrip = new Map();
+  for (const prefix of ['album/', 'richtext_images/', 'attachments/']) {
+    let blobs = [];
     try {
-      const { blobs } = await list({ prefix: `${prefix}/`, limit: 1000 });
-      for (const blob of blobs) {
-        const parts = blob.pathname.split('/');
-        const tripId = parts[1];
-        if (!tripId) continue;
-        prefixMap[prefix].push({ blob, tripId });
-      }
-    } catch { /* ignore */ }
-  }
-
-  const moved = [];
-  for (const [type, entries] of Object.entries(prefixMap)) {
-    for (const { blob, tripId } of entries) {
-      if (!tripIds.has(tripId)) {
-        const name = blob.pathname.split('/').pop();
-        if (name.startsWith('thumb_') || name.startsWith('cover_')) {
-          await del(blob.url);
-          moved.push({ from: blob.pathname, deleted: true });
-        }
-      }
+      blobs = await listAllByPrefix(prefix);
+    } catch { /* 单个前缀失败不影响其他前缀 */ }
+    for (const blob of blobs) {
+      const parts = blob.pathname.split('/');
+      const tripId = parts[1];
+      if (!tripId) continue;
+      if (!byTrip.has(tripId)) byTrip.set(tripId, []);
+      byTrip.get(tripId).push(blob);
     }
   }
 
-  return { moved_count: moved.length, moved };
+  // 删除所属旅行已不存在的全部对象（原图、缩略图、封面）
+  const removed = [];
+  for (const [tripId, blobs] of byTrip) {
+    if (tripIds.has(tripId)) continue;
+    const urls = blobs.map((b) => b.url).filter(Boolean);
+    if (!urls.length) continue;
+    await del(urls);
+    for (const blob of blobs) removed.push({ pathname: blob.pathname, deleted: true });
+  }
+
+  return { moved_count: removed.length, moved: removed };
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -299,7 +323,7 @@ router.post('/trips', requireAdmin, tripFields, async (req, res, next) => {
     const saved = await saveUploads(id, req.files);
     await sql`
       INSERT INTO trips (id, name, province, city, address_detail, latitude, longitude, start_date, end_date, participants, rich_text_path, album_path, attachments_path, cover_path, cover_meta, card_position_x, card_position_y, created_at, updated_at)
-      VALUES (${id}, ${req.body.name || ''}, ${req.body.province || ''}, ${req.body.city || ''}, ${req.body.address_detail || ''}, ${roundCoordinate(req.body.latitude)}, ${roundCoordinate(req.body.longitude)}, ${req.body.start_date || ''}, ${req.body.end_date || ''}, ${req.body.participants || ''}, ${req.body.rich_text || ''}, ${''}, ${''}, ${saved.cover_path || ''}, ${saved.cover_meta ? JSON.stringify(saved.cover_meta) : ''}, ${Number(req.body.card_position_x) || 104}, ${Number(req.body.card_position_y) || 35}, ${now}, ${now})
+      VALUES (${id}, ${req.body.name || ''}, ${req.body.province || ''}, ${req.body.city || ''}, ${req.body.address_detail || ''}, ${roundCoordinate(req.body.latitude)}, ${roundCoordinate(req.body.longitude)}, ${req.body.start_date || ''}, ${req.body.end_date || ''}, ${req.body.participants || ''}, ${sanitizeRichText(req.body.rich_text)}, ${''}, ${''}, ${saved.cover_path || ''}, ${saved.cover_meta ? JSON.stringify(saved.cover_meta) : ''}, ${clampNumber(req.body.card_position_x, -180, 180, 104)}, ${clampNumber(req.body.card_position_y, -90, 90, 35)}, ${now}, ${now})
     `;
     const rows = await sql`SELECT * FROM trips WHERE id = ${id}`;
     res.status(201).json(normalizeTrip(rows[0]));
@@ -323,13 +347,13 @@ router.put('/trips/:id', requireAdmin, tripFields, async (req, res, next) => {
         start_date = ${req.body.start_date ?? cur.start_date},
         end_date = ${req.body.end_date ?? cur.end_date},
         participants = ${req.body.participants ?? cur.participants},
-        rich_text_path = ${req.body.rich_text ?? cur.rich_text_path},
+        rich_text_path = ${req.body.rich_text === undefined ? cur.rich_text_path : sanitizeRichText(req.body.rich_text)},
         album_path = ${cur.album_path},
         attachments_path = ${cur.attachments_path},
         cover_path = ${saved.cover_path || cur.cover_path},
         cover_meta = ${saved.cover_meta ? JSON.stringify(saved.cover_meta) : cur.cover_meta},
-        card_position_x = ${req.body.card_position_x === undefined ? cur.card_position_x : Number(req.body.card_position_x)},
-        card_position_y = ${req.body.card_position_y === undefined ? cur.card_position_y : Number(req.body.card_position_y)},
+        card_position_x = ${req.body.card_position_x === undefined ? cur.card_position_x : clampNumber(req.body.card_position_x, -180, 180, cur.card_position_x)},
+        card_position_y = ${req.body.card_position_y === undefined ? cur.card_position_y : clampNumber(req.body.card_position_y, -90, 90, cur.card_position_y)},
         updated_at = ${new Date().toISOString()}
       WHERE id = ${req.params.id}
     `;
@@ -345,12 +369,22 @@ router.delete('/trips/:id/files', requireAdmin, async (req, res, next) => {
     if (!type || !name || !['album', 'attachments'].includes(type)) {
       return res.status(400).json({ error: 'Invalid type or name' });
     }
-    const blobName = `${type}/${req.params.id}/${safeName(name)}`;
-    const thumbName = type === 'album' ? `${type}/${req.params.id}/thumb_${safeName(name)}.jpg` : null;
-    try { await del(blobName); } catch { /* already deleted */ }
-    if (thumbName) {
-      try { await del(thumbName); } catch { /* no thumb */ }
+    // 注意：@vercel/blob 的 del() 只接受完整 URL，传 pathname 会静默失败。
+    // 因此先按 prefix 列出对象、精确匹配 pathname，再删除其 URL。
+    const targets = [];
+    const collect = async (pathname) => {
+      try {
+        const { blobs } = await list({ prefix: pathname, limit: 20 });
+        for (const blob of blobs) {
+          if (blob.pathname === pathname) targets.push(blob.url);
+        }
+      } catch { /* 对象可能已不存在 */ }
+    };
+    await collect(`${type}/${req.params.id}/${safeName(name)}`);
+    if (type === 'album') {
+      await collect(`${type}/${req.params.id}/thumb_${safeName(name)}.jpg`);
     }
+    if (targets.length) await del(targets);
     res.status(204).end();
   } catch (e) { next(e); }
 });
