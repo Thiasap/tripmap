@@ -354,6 +354,31 @@ async function main() {
     assert.ok(sawBlock, '应出现 429 限速响应');
   });
 
+  await test('限速按 X-Forwarded-For 中的客户端 IP 分桶', async () => {
+    // 一个已被锁定的来源，不应连带影响另一个来源
+    const blocked = await request('POST', '/api/login', {
+      body: { password: 'bad' },
+      headers: { 'X-Forwarded-For': '203.0.113.9' }
+    });
+    assert.equal(blocked.status, 403, '新来源首次失败应为 403');
+
+    let lastStatus = 0;
+    for (let i = 0; i < 11; i += 1) {
+      const res = await request('POST', '/api/login', {
+        body: { password: 'bad' },
+        headers: { 'X-Forwarded-For': '203.0.113.9' }
+      });
+      lastStatus = res.status;
+    }
+    assert.equal(lastStatus, 429, '该来源达上限后应被锁定');
+
+    const other = await request('POST', '/api/login', {
+      body: { password: 'bad' },
+      headers: { 'X-Forwarded-For': '203.0.113.10' }
+    });
+    assert.equal(other.status, 403, '另一来源不应被连带锁定');
+  });
+
   process.stdout.write('\n数据写入与净化\n');
 
   let createdTripId = null;
