@@ -3,6 +3,7 @@ const path = require('path');
 const helmet = require('helmet');
 const { initDB } = require('../server/db');
 const routes = require('../server/routes');
+const { mediaImgSrc } = require('../server/csp');
 const {
   passwordMatches,
   registerFailedLogin,
@@ -24,8 +25,9 @@ const cookieSecure = process.env.NODE_ENV === 'production';
  * 2. 登录限速基于进程内存：Serverless 多实例下为尽力而为的缓解措施，
  *    真正的防护依赖强密码 + Vercel 平台侧限制，此处不宣称强保证。
  * 3. CSP 允许 style-src 'unsafe-inline'（Quill/GLightbox/卡片动态样式依赖），
- *    script-src 严格限定 'self'，前端无内联脚本。img-src 放行 Blob 域名，
- *    因为媒体对象由 Vercel Blob 直接提供。
+ *    script-src 严格限定 'self'，前端无内联脚本。img-src 由 server/csp.js 统一构建，
+ *    放行当前媒体后端（Vercel Blob / Cloudflare R2）的公开域名——媒体对象不经应用
+ *    转发，全部由外部存储直接提供给浏览器，漏放行会表现为「图片全白」。
  * 4. 错误响应不返回内部细节；服务端错误统一 500 通用文案。
  * ──────────────────────────────────────────────────────────────────────
  */
@@ -36,7 +38,7 @@ app.use(helmet({
       'upgrade-insecure-requests': null,
       'script-src': ["'self'"],
       'style-src': ["'self'", "'unsafe-inline'"],
-      'img-src': ["'self'", 'data:', 'blob:', 'https://*.public.blob.vercel-storage.com'],
+      'img-src': mediaImgSrc(),
       'font-src': ["'self'", 'data:'],
       'connect-src': ["'self'"]
     }

@@ -302,6 +302,30 @@ async function main() {
     assert.ok(csp.includes('blob.vercel-storage.com'), 'img-src 应放行 Blob 域名');
   });
 
+  await test('CSP img-src 随存储后端放行 R2 域名', async () => {
+    const { mediaImgSrc, BLOB_ORIGIN } = require('../../server/csp');
+    const prev = process.env.R2_PUBLIC_BASE_URL;
+    try {
+      process.env.R2_PUBLIC_BASE_URL = 'https://trip.qzbucket.qzz.io';
+      const withR2 = mediaImgSrc();
+      assert.ok(withR2.includes(BLOB_ORIGIN), 'img-src 必须始终保留 Blob 域名（回滚路径需要）');
+      assert.ok(withR2.includes('https://trip.qzbucket.qzz.io'), `img-src 应放行 R2 域名，实际: ${withR2.join(' ')}`);
+
+      process.env.R2_PUBLIC_BASE_URL = 'https://cdn.example.com/media/';
+      const withPath = mediaImgSrc();
+      assert.ok(withPath.includes('https://cdn.example.com'), '应取 origin 而非完整 URL');
+      assert.ok(!withPath.includes('https://cdn.example.com/media'), '不应把路径写进 CSP');
+
+      process.env.R2_PUBLIC_BASE_URL = 'not-a-url';
+      assert.ok(!mediaImgSrc().includes('not-a-url'), '非法配置不得进入策略');
+
+      delete process.env.R2_PUBLIC_BASE_URL;
+      assert.deepEqual(mediaImgSrc(), ["'self'", 'data:', 'blob:', BLOB_ORIGIN], '未配置 R2 时保持原策略');
+    } finally {
+      if (prev === undefined) delete process.env.R2_PUBLIC_BASE_URL; else process.env.R2_PUBLIC_BASE_URL = prev;
+    }
+  });
+
   await test('返回其他基础安全头', async () => {
     const res = await request('GET', '/api/auth/status');
     assert.equal(res.headers['x-content-type-options'], 'nosniff');

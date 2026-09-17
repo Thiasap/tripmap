@@ -3,6 +3,7 @@ const path = require('path');
 const helmet = require('helmet');
 const { initDB } = require('./db');
 const routes = require('./routes');
+const { mediaImgSrc } = require('./csp');
 const {
   passwordMatches,
   registerFailedLogin,
@@ -25,7 +26,7 @@ app.use(helmet({
       'upgrade-insecure-requests': null,
       'script-src': ["'self'"],
       'style-src': ["'self'", "'unsafe-inline'"],
-      'img-src': ["'self'", 'data:', 'blob:', 'https://*.public.blob.vercel-storage.com'],
+      'img-src': mediaImgSrc(),
       'font-src': ["'self'", 'data:'],
       'connect-src': ["'self'"]
     }

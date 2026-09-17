@@ -565,3 +565,97 @@ input:disabled { background: #f8fafc; color: #64748b; }
 .pagination button:disabled { opacity: 0.4; cursor: default; }
 .pagination button.active { background: #2563eb; color: white; border-color: #2563eb; }
 .pagination span { color: #64748b; font-size: 13px; }
+
+/* ---------- 移动端 / 窄屏紧凑布局（<768px，由 body.layout-compact 驱动） ---------- */
+body.layout-compact { overflow: auto; }
+
+body.layout-compact .topbar {
+  height: auto;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 14px;
+}
+body.layout-compact h1 { font-size: 19px; }
+body.layout-compact .topbar-actions { flex-wrap: wrap; gap: 8px; }
+body.layout-compact .scale-control { display: none; }
+
+body.layout-compact .workspace { height: auto; }
+body.layout-compact .map-wrap { height: 42vh; min-height: 240px; }
+body.layout-compact .map-hint {
+  left: 10px;
+  right: 10px;
+  bottom: 10px;
+  font-size: 12px;
+  text-align: center;
+}
+
+/* 卡片脱离地图坐标系，走文档流网格列表 */
+body.layout-compact .cards-layer {
+  position: static;
+  inset: auto;
+  z-index: auto;
+  pointer-events: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+  padding: 14px 14px 32px;
+  background: #eef3f7;
+}
+body.layout-compact .trip-card {
+  position: static;
+  width: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  transform: none !important;
+  touch-action: pan-y;
+  cursor: pointer;
+  border-radius: 14px;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+}
+body.layout-compact .trip-card .card-cover {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+}
+body.layout-compact #linkSvg { display: none; }
+
+/* 窄屏改块级布局：grid 的 auto 轨道上 max-width:100% 会形成循环依赖而被忽略，
+   弹窗会保持 920px 溢出视口；块级包含块宽度确定，百分比才能正常生效 */
+body.layout-compact .trip-overlay {
+  display: block;
+  overflow: auto;
+  padding: 8px;
+}
+body.layout-compact .trip-dialog {
+  width: 100%;
+  max-width: none;
+  margin: 0 auto;
+}
+body.layout-compact .trip-dialog-scroll { max-height: calc(100vh - 20px); }
+body.layout-compact #tripForm { padding: 16px; }
+/* minmax(0,1fr)：grid 轨道默认最小值是 input 的固有宽度，两列会把容器撑爆 */
+body.layout-compact #tripForm input,
+body.layout-compact #tripForm button,
+body.layout-compact #tripForm select { min-width: 0; }
+body.layout-compact .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+body.layout-compact .dialog-head { flex-wrap: wrap; gap: 10px; }
+body.layout-compact .dialog-actions { flex-wrap: wrap; }
+/* 经纬度行：flex 换行在窄屏会算错导致按钮溢出，改网格做确定性排布 */
+body.layout-compact .coord-inline {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+body.layout-compact .coord-inline input,
+body.layout-compact .coord-inline button {
+  flex: none !important;
+  width: 100%;
+}
+body.layout-compact .coord-inline input[name="coord_raw"],
+body.layout-compact .coord-inline #autoDetectCoordBtn,
+body.layout-compact .coord-inline #pickCoordinateBtn {
+  grid-column: 1 / -1;
+}
+body.layout-compact .media-editor { grid-template-columns: 1fr; }
+body.layout-compact .rich-editor .ql-editor { min-height: 140px; }
