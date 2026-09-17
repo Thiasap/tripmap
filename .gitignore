@@ -30,4 +30,5 @@ media_recycle*/
 
 # 恢复演练实例（临时验证用）
 /.restore-test/
+/.dr-drill/
 
