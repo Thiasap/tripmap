@@ -3,7 +3,7 @@ const path = require('path');
 const multer = require('multer');
 const sharp = require('sharp');
 const sanitizeHtml = require('sanitize-html');
-const { put, del, list } = require('@vercel/blob');
+const { put, del, list, read } = require('./adapters/storage').storage();
 const jwt = require('jsonwebtoken');
 const { sql } = require('./db');
 const { JWT_SECRET } = require('./auth');
@@ -231,13 +231,8 @@ async function recycleBlobs(blobs, { concurrency = 4 } = {}) {
       const blob = targets[current];
       const target = `recycle/${stamp}/${blob.pathname}`;
       try {
-        const response = await fetch(blob.url);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const buffer = Buffer.from(await response.arrayBuffer());
-        await put(target, buffer, {
-          access: 'public',
-          contentType: response.headers.get('content-type') || 'application/octet-stream'
-        });
+        const { body, contentType } = await read(blob);
+        await put(target, body, { contentType });
         moved.push({ from: blob.pathname, to: target });
       } catch {
         // 复制失败：保留原对象，不执行删除
@@ -497,13 +492,8 @@ async function migrateDraftImages(tripId, html) {
     const name = blob.pathname.slice(draftPrefix.length);
     if (!name) continue;
     try {
-      const response = await fetch(blob.url);
-      if (!response.ok) continue;
-      const buffer = Buffer.from(await response.arrayBuffer());
-      const uploaded = await put(`richtext_images/${tripId}/${name}`, buffer, {
-        access: 'public',
-        contentType: response.headers.get('content-type') || 'application/octet-stream'
-      });
+      const { body, contentType } = await read(blob);
+      const uploaded = await put(`richtext_images/${tripId}/${name}`, body, { contentType });
       result = result.split(blob.url).join(uploaded.url);
       urlsToDelete.push(blob.url);
     } catch { /* 保留原 URL，避免图片链接失效 */ }

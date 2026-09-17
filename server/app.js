@@ -85,6 +85,13 @@ app.get('/api/auth/status', (req, res) => {
 
 app.use('/api', routes);
 
+// 本地后端（TRIPMAP_BACKEND=local）：媒体由本地文件系统托管，url 形如 /media/...
+// 云端后端媒体是 Blob 绝对 URL，不需要此路由
+const storageAdapter = require('./adapters/storage').storage();
+if (storageAdapter.mode === 'local' && storageAdapter.mediaRoot) {
+  app.use('/media', express.static(storageAdapter.mediaRoot));
+}
+
 app.use(express.static(path.join(rootDir, 'public')));
 
 app.use((err, req, res, next) => {

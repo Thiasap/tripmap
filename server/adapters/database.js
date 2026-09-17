@@ -14,8 +14,7 @@
  *   local        → SQLite（node:sqlite，同步）—— P3 落地
  */
 
-const MODE = String(process.env.TRIPMAP_BACKEND || 'cloud').toLowerCase();
-const SUPPORTED_MODES = ['cloud', 'local'];
+const { MODE, assertModeAllowed } = require('./mode');
 
 /** 默认设置项（两种后端共用） */
 const DEFAULT_SETTINGS = {
@@ -29,17 +28,8 @@ const DEFAULT_SETTINGS = {
 };
 
 /**
- * 模式校验：宁可起不来，也不写错库。
- * 不满足即抛错（不做静默回退）。
+ * 模式校验：宁可起不来，也不写错库（实现见 ./mode.js）。
  */
-function assertModeAllowed() {
-  if (!SUPPORTED_MODES.includes(MODE)) {
-    throw new Error(`[db] 未知的 TRIPMAP_BACKEND: ${MODE}（可选 ${SUPPORTED_MODES.join(' / ')}）`);
-  }
-  if (MODE === 'local' && process.env.VERCEL_ENV === 'production') {
-    throw new Error('[db] 生产环境（VERCEL_ENV=production）禁止使用 local 后端');
-  }
-}
 
 /** Neon PostgreSQL 实现（生产默认） */
 function createPostgresDatabase() {
@@ -100,9 +90,9 @@ function createPostgresDatabase() {
   return { sql, initDB, mode: 'cloud' };
 }
 
-/** SQLite 实现（本地开发）—— 见 .agent/MERGE_PLAN.md 阶段 P3 */
+/** SQLite 实现（本地开发）：见 ./local/database.js */
 function createLocalDatabase() {
-  throw new Error('[db] local 后端尚未实现（见 .agent/MERGE_PLAN.md 阶段 P3）');
+  return require('./local/database').createLocalDatabase();
 }
 
 function createDatabase() {
