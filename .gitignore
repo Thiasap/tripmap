@@ -28,3 +28,6 @@ media_recycle*/
 # 备份产物（本地/离线，禁止提交）
 /backups/
 
+# 恢复演练实例（临时验证用）
+/.restore-test/
+
