@@ -43,6 +43,7 @@ async function saveSettings(event) {
 }
 
 async function cleanupMedia() {
+  if (!window.confirm('清理会永久删除未引用的孤立图片，并清空回收站（含此前删除的文件），且不可恢复。继续？')) return;
   cleanupBtn.disabled = true;
   cleanupResult.classList.remove('hidden');
   cleanupResult.textContent = '正在清理...';
@@ -50,10 +51,16 @@ async function cleanupMedia() {
     const res = await fetch('/api/cleanup-media', { method: 'POST' });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
-    const failedNote = data.failed_count ? `\n（${data.failed_count} 个文件回收失败，已保留原文件）` : '';
-    cleanupResult.textContent = data.moved_count
-      ? `已回收 ${data.moved_count} 个文件到 ${data.recycle_path}${failedNote}\n\n${data.moved.map((item) => `${item.from} -> ${item.to}`).join('\n')}`
-      : `没有发现需要清理的文件。${failedNote}`;
+    const purged = Number(data.purged_count) || 0;
+    const moved = Number(data.moved_count) || 0;
+    const failNote = (data.failed_count || data.purge_failed_count)
+      ? `\n（失败：孤立资源 ${data.failed_count || 0} 个、回收站 ${data.purge_failed_count || 0} 个，已保留原对象）`
+      : '';
+    const lines = [];
+    if (purged) lines.push(`已清空回收站 ${purged} 个文件（永久删除）`);
+    if (moved) lines.push(`本次识别孤立资源 ${moved} 个（已随回收站一并删除）`);
+    cleanupResult.textContent = (lines.length ? lines.join('\n') : '没有发现需要清理的内容。') + failNote
+      + (data.moved.length ? '\n\n' + data.moved.map((item) => item.from).join('\n') : '');
   } catch (error) {
     cleanupResult.textContent = error.message;
   } finally {

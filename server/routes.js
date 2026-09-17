@@ -293,11 +293,41 @@ async function listAllByPrefix(prefix) {
 const DRAFT_GRACE_MS = 24 * 60 * 60 * 1000;
 
 /**
- * 清理孤立媒体。判定规则与本地版一致：
+ * 清空回收站：彻底删除 recycle/ 下的全部对象。
+ *
+ * 与「删除」不同——删除只是把对象搬进回收站（可人工找回），清理是显式的彻底操作。
+ * 对象已在回收站中，无需再复制，直接 del；批次失败时逐个重试并如实统计失败数。
+ */
+async function purgeRecycle() {
+  const blobs = await listAllByPrefix('recycle/');
+  const urls = blobs.map((b) => b.url).filter(Boolean);
+  let purged = 0;
+  let failed = 0;
+
+  const CHUNK = 100;
+  for (let i = 0; i < urls.length; i += CHUNK) {
+    const chunk = urls.slice(i, i + CHUNK);
+    try {
+      await del(chunk);
+      purged += chunk.length;
+    } catch {
+      // 批次失败时逐个重试，尽量清空并准确统计失败数
+      for (const url of chunk) {
+        try { await del(url); purged += 1; } catch { failed += 1; }
+      }
+    }
+  }
+  return { purged, failed };
+}
+
+/**
+ * 清理媒体。判定规则：
  * 1. 所属旅行已不存在的目录（draft 除外）→ 回收
  * 2. richtext_images/draft 中超过 24 小时宽限期的对象 → 回收
  * 3. 富文本正文未引用的 richtext_images 对象 → 回收
  * 4. 原图已不存在的缩略图（thumb_ 前缀）→ 回收
+ * 5. 最后清空回收站（recycle/ 下全部对象彻底删除）——「清理」是显式的彻底操作，
+ *    回收站只作为「删除」的缓冲，不长期堆积。
  * 其余（存在旅行的相册、附件、被引用的富文本图）一律保留。
  */
 async function cleanupMediaFiles() {
@@ -347,11 +377,15 @@ async function cleanupMediaFiles() {
   }
 
   const result = await recycleBlobs(targets);
+  // 回收站是「删除」的缓冲，不长期堆积：清理时把其中内容（含本次识别出的孤立资源）一并彻底删除
+  const purge = await purgeRecycle();
   return {
     recycle_path: result.recyclePath,
     moved_count: result.moved.length,
     moved: result.moved,
-    failed_count: result.failed
+    failed_count: result.failed,
+    purged_count: purge.purged,
+    purge_failed_count: purge.failed
   };
 }
 

@@ -487,6 +487,8 @@ async function main() {
     assert.ok('recycle_path' in res.json, '应含 recycle_path');
     assert.ok('moved_count' in res.json, '应含 moved_count');
     assert.ok(Array.isArray(res.json.moved), '应含 moved 数组');
+    assert.ok('purged_count' in res.json, '应含 purged_count');
+    assert.ok('purge_failed_count' in res.json, '应含 purge_failed_count');
   });
 
   await test('清理不会回收仍存在旅行的相册图', async () => {
@@ -503,6 +505,20 @@ async function main() {
     const res = await request('POST', '/api/cleanup-media', { cookie: adminCookie });
     assert.equal(res.status, 200);
     assert.equal(blobs.has(orphanThumb), false, '无对应原图的缩略图应被回收');
+  });
+
+  await test('清理会彻底清空回收站（recycle/ 下对象永久删除）', async () => {
+    const recycledAlbum = `recycle/2026-01-01_00-00-00/album/${createdTripId}/old.jpg`;
+    const recycledAttachment = 'recycle/2026-01-01_00-00-00/attachments/other/z.pdf';
+    await blobStub.put(recycledAlbum, Buffer.from('a'), { contentType: 'image/jpeg' });
+    await blobStub.put(recycledAttachment, Buffer.from('b'), { contentType: 'application/pdf' });
+    assert.equal(blobs.has(recycledAlbum), true, '前置条件：回收站中应存在对象');
+
+    const res = await request('POST', '/api/cleanup-media', { cookie: adminCookie });
+    assert.equal(res.status, 200);
+    assert.ok(res.json.purged_count >= 2, `purged_count 应至少为 2，实际 ${res.json.purged_count}`);
+    assert.equal(blobs.has(recycledAlbum), false, '回收站中的相册对象应被彻底删除');
+    assert.equal(blobs.has(recycledAttachment), false, '回收站中的附件也应被彻底删除');
   });
 
   await test('删除接口拒绝非法 type', async () => {
