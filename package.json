@@ -7,7 +7,7 @@
     "start": "node server/app.js",
     "dev": "vercel dev",
     "vercel-build": "node scripts/copy-vendor.js",
-    "test": "node tools/test/adapter-contract.mjs && node tools/test/run-tests.mjs && node tools/test/vercel-server-tests.mjs && node tools/test/vercel-integration.mjs",
+    "test": "node tools/test/adapter-contract.mjs && node tools/test/run-tests.mjs && node tools/test/vercel-server-tests.mjs && node tools/test/vercel-integration.mjs && node tools/test/local-e2e.mjs",
     "test:backup": "node tools/test/run-tests.mjs",
     "test:server": "node tools/test/vercel-server-tests.mjs && node tools/test/vercel-integration.mjs",
     "backup": "node tools/backup/run-all.mjs",
