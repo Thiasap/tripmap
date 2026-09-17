@@ -167,6 +167,11 @@ async function main() {
     .filter((e) => !usedPathnames.has(e.pathname))
     .map((e) => ({ pathname: e.pathname, size: e.bytes, status: e.status }));
 
+  // 缩略图由原图派生，数据库不会直接引用，属于预期孤儿
+  const isDerivedThumb = (p) => /(^|\/)thumb_[^/]+$/.test(p);
+  const derivedThumbs = orphans.filter((o) => isDerivedThumb(o.pathname));
+  const unexpectedOrphans = orphans.filter((o) => !isDerivedThumb(o.pathname));
+
   const referencedBytes = blobEntries
     .filter((e) => usedPathnames.has(e.pathname))
     .reduce((sum, e) => sum + (e.bytes || 0), 0);
@@ -178,13 +183,16 @@ async function main() {
     referencedBytes,
     orphanCount: orphans.length,
     orphanBytes: orphans.reduce((s, o) => s + (o.size || 0), 0),
+    derivedThumbCount: derivedThumbs.length,
+    unexpectedOrphanCount: unexpectedOrphans.length,
+    unexpectedOrphans: unexpectedOrphans.slice(0, 30),
     orphans: orphans.slice(0, 30)
   };
   if (referencedMissing.length) {
     report.errors.push(`${referencedMissing.length} 个数据库引用的媒体在 Blob 中缺失`);
   }
-  if (orphans.length) {
-    report.warnings.push(`${orphans.length} 个 Blob 对象未被数据库引用（可能为封面缩略图或历史遗留）`);
+  if (unexpectedOrphans.length) {
+    report.warnings.push(`${unexpectedOrphans.length} 个 Blob 对象未被数据库引用且非缩略图（可能为历史遗留，建议人工确认）`);
   }
 
   // 6. 写报告
@@ -198,7 +206,7 @@ async function main() {
   log(`  旅行 ${report.checks.database.counts.trips} | 设置 ${report.checks.database.counts.settings} | 人员 ${report.checks.database.counts.participants}`);
   log(`  Blob 索引 ${report.checks.blobs.indexCount} 条；对象校验 ${verified} 通过`);
   log(`  引用媒体 ${referenced.size} 个（${formatBytes(referencedBytes)}），缺失 ${referencedMissing.length}`);
-  log(`  孤儿对象 ${orphans.length}（${formatBytes(report.checks.references.orphanBytes)}）`);
+  log(`  缩略图 ${derivedThumbs.length} 个（派生，符合预期）；其他未引用对象 ${unexpectedOrphans.length} 个`);
   log(`  报告: ${path.relative(process.cwd(), reportPath).replace(/\\/g, '/')}`);
 
   if (report.errors.length) {

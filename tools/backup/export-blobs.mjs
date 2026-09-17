@@ -59,9 +59,46 @@ async function listAllBlobs(token) {
   return all;
 }
 
-async function downloadBlob(blob, blobsDir, { retries = 3 } = {}) {
+/** 索引键：同一 pathname 在相同字节数下视为同一对象版本 */
+function indexKey(pathname, size) {
+  return `${pathname}|${size}`;
+}
+
+/**
+ * 读取已有 index.jsonl，得到 pathname+size → 既有条目。
+ * 用于增量续跑：URL 未变且本地对象存在时跳过下载。
+ */
+async function loadPreviousIndex(indexPath) {
+  const map = new Map();
+  try {
+    const text = await fsp.readFile(indexPath, 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.trim()) continue;
+      try {
+        const entry = JSON.parse(line);
+        if (entry.status === 'ok' && entry.objectPath && entry.sha256) {
+          map.set(indexKey(entry.pathname, entry.size), entry);
+        }
+      } catch { /* 跳过损坏行 */ }
+    }
+  } catch { /* 无历史索引 */ }
+  return map;
+}
+
+async function downloadBlob(blob, blobsDir, { retries = 3, previous = null } = {}) {
   const result = { pathname: blob.pathname, url: blob.url, size: blob.size, contentType: blob.contentType || null,
     uploadedAt: blob.uploadedAt || null, etag: blob.etag || null, sha256: null, objectPath: null, status: 'ok' };
+
+  // 增量：同一 pathname+size 且本地对象完好则直接复用
+  if (previous && previous.url === blob.url && previous.sha256) {
+    const existingObject = path.join(blobsDir, previous.objectPath);
+    try {
+      const stat = await fsp.stat(existingObject);
+      if (stat.size === previous.bytes) {
+        return { ...result, ...previous, url: blob.url, skipped: true };
+      }
+    } catch { /* 对象缺失，回退为重新下载 */ }
+  }
 
   let lastError;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
@@ -139,9 +176,16 @@ async function main() {
 
   await fsp.mkdir(objectsDir, { recursive: true });
 
+  // 增量续跑：复用上次索引中 URL 与字节数都一致的条目
+  const previousIndex = await loadPreviousIndex(path.join(blobsDir, 'index.jsonl'));
+  if (previousIndex.size) log(`已有索引条目: ${previousIndex.size}（相同对象将跳过下载）`);
+
   let done = 0;
+  let reused = 0;
   const index = await runPool(blobs, concurrency, async (blob) => {
-    const entry = await downloadBlob(blob, blobsDir);
+    const previous = previousIndex.get(indexKey(blob.pathname, blob.size)) || null;
+    const entry = await downloadBlob(blob, blobsDir, { previous });
+    if (entry.skipped) reused += 1;
     done += 1;
     if (done % 25 === 0 || done === blobs.length) {
       log(`  进度 ${done}/${blobs.length}`);
@@ -187,6 +231,7 @@ async function main() {
 
   log('');
   log(`下载完成：${index.length - failures.length}/${blobs.length} 成功，用时 ${((Date.now() - started) / 1000).toFixed(1)}s`);
+  log(`  复用已有对象: ${reused}`);
   log(`  唯一对象（按内容去重）: ${uniqueObjects}`);
   log(`  字节数: ${formatBytes(downloadedBytes)}`);
   if (failures.length) {
