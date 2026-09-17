@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   sha256File,
   parseArgs,
@@ -25,6 +26,13 @@ import {
   log,
   logError
 } from '../lib/common.mjs';
+import { validate } from '../lib/json-schema.mjs';
+
+const schemaPath = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'schemas',
+  'export-v1.schema.json'
+);
 
 function loadJsonl(text) {
   return text
@@ -83,6 +91,23 @@ async function main() {
 
   const badTrips = (exportDoc.trips || []).filter((t) => !t || !t.id);
   if (badTrips.length) report.errors.push(`${badTrips.length} 条旅行记录缺少 id`);
+
+  // 2b. JSON Schema 结构校验
+  if (fs.existsSync(schemaPath)) {
+    const schema = JSON.parse(await fsp.readFile(schemaPath, 'utf8'));
+    const schemaErrors = validate(exportDoc, schema);
+    report.checks.schema = {
+      path: path.relative(process.cwd(), schemaPath).replace(/\\/g, '/'),
+      ok: schemaErrors.length === 0,
+      errorCount: schemaErrors.length,
+      errors: schemaErrors.slice(0, 20)
+    };
+    if (schemaErrors.length) {
+      report.errors.push(`导出文件不符合 export-v1 schema（${schemaErrors.length} 处）`);
+    }
+  } else {
+    report.checks.schema = { ok: null, note: '未找到 schema 文件，跳过结构校验' };
+  }
 
   // 3. Blob 索引
   const indexPath = path.join(backupDir, manifest.blobs?.indexPath || 'blobs/index.jsonl');
@@ -204,6 +229,7 @@ async function main() {
   log('');
   log(`校验${report.ok ? '通过' : '失败'}`);
   log(`  旅行 ${report.checks.database.counts.trips} | 设置 ${report.checks.database.counts.settings} | 人员 ${report.checks.database.counts.participants}`);
+  log(`  schema 结构校验: ${report.checks.schema.ok === null ? '跳过' : (report.checks.schema.ok ? '通过' : `${report.checks.schema.errorCount} 处不符`)}`);
   log(`  Blob 索引 ${report.checks.blobs.indexCount} 条；对象校验 ${verified} 通过`);
   log(`  引用媒体 ${referenced.size} 个（${formatBytes(referencedBytes)}），缺失 ${referencedMissing.length}`);
   log(`  缩略图 ${derivedThumbs.length} 个（派生，符合预期）；其他未引用对象 ${unexpectedOrphans.length} 个`);

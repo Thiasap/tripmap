@@ -5,7 +5,10 @@
   "scripts": {
     "start": "node server/app.js",
     "dev": "vercel dev",
-    "vercel-build": "node scripts/copy-vendor.js"
+    "vercel-build": "node scripts/copy-vendor.js",
+    "test": "node tools/test/run-tests.mjs",
+    "backup": "node tools/backup/run-all.mjs",
+    "backup:verify": "node tools/backup/verify-backup.mjs"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.0",

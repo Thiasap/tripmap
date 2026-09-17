@@ -1,0 +1,145 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tripmap.local/schemas/export-v1.json",
+  "title": "Tripmap 应用级导出格式 v1",
+  "description": "备份工具导出的业务数据快照。用于离线存档与本地恢复，不包含任何凭据。",
+  "type": "object",
+  "required": ["format", "version", "exportedAt", "source", "counts", "trips", "settings", "participants", "mediaIndex", "mediaReferences"],
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "tripmap-export"
+    },
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "exportedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "type": "object",
+      "required": ["baseUrl"],
+      "properties": {
+        "baseUrl": { "type": "string" }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "required": ["trips", "settings", "participants", "mediaReferences"],
+      "properties": {
+        "trips": { "type": "integer", "minimum": 0 },
+        "settings": { "type": "integer", "minimum": 0 },
+        "participants": { "type": "integer", "minimum": 0 },
+        "mediaReferences": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "trips": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "name": { "type": ["string", "null"] },
+          "province": { "type": ["string", "null"] },
+          "city": { "type": ["string", "null"] },
+          "address_detail": { "type": ["string", "null"] },
+          "latitude": { "type": ["number", "null"] },
+          "longitude": { "type": ["number", "null"] },
+          "start_date": { "type": ["string", "null"] },
+          "end_date": { "type": ["string", "null"] },
+          "participants": { "type": ["string", "null"] },
+          "rich_text_path": {
+            "type": ["string", "null"],
+            "description": "注意：字段名虽为 path，实际存放富文本 HTML 原文"
+          },
+          "album_path": { "type": ["string", "null"] },
+          "attachments_path": { "type": ["string", "null"] },
+          "cover_path": {
+            "type": ["string", "null"],
+            "description": "线上版本为 Blob 绝对 URL；本地版本为 /media/... 路径"
+          },
+          "cover_meta": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "properties": {
+                  "width": { "type": "number" },
+                  "height": { "type": "number" }
+                }
+              }
+            ]
+          },
+          "card_position_x": { "type": ["number", "null"] },
+          "card_position_y": { "type": ["number", "null"] },
+          "created_at": { "type": ["string", "null"] },
+          "updated_at": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "settings": {
+      "type": "object",
+      "description": "键值对配置，值在导出时为原始类型（数字或字符串）",
+      "additionalProperties": {
+        "type": ["string", "number", "boolean", "null"]
+      }
+    },
+    "participants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "id": { "type": ["integer", "null"] },
+          "name": { "type": "string", "minLength": 1 },
+          "last_participated_at": { "type": ["string", "null"] },
+          "count": { "type": ["integer", "null"], "minimum": 0 }
+        }
+      }
+    },
+    "mediaIndex": {
+      "type": "array",
+      "description": "逐条旅行的媒体清单（不含封面），取自 /api/trips/:id/files",
+      "items": {
+        "type": "object",
+        "required": ["tripId"],
+        "properties": {
+          "tripId": { "type": "string" },
+          "error": { "type": "string" },
+          "album": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/mediaFile" }
+          },
+          "attachments": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/mediaFile" }
+          },
+          "richtextImages": {
+            "type": "array",
+            "items": { "$ref": "#/definitions/mediaFile" }
+          }
+        }
+      }
+    },
+    "mediaReferences": {
+      "type": "array",
+      "description": "去重排序后的全部媒体 URL（含封面），用于与 Blob 索引做双向比对",
+      "items": { "type": "string" }
+    }
+  },
+  "definitions": {
+    "mediaFile": {
+      "type": "object",
+      "required": ["name", "url"],
+      "properties": {
+        "name": { "type": "string" },
+        "url": { "type": "string" },
+        "thumb": { "type": "string" }
+      }
+    }
+  }
+}
