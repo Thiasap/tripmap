@@ -9,19 +9,7 @@
 const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
-
-const CONTENT_TYPES = {
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.png': 'image/png',
-  '.gif': 'image/gif',
-  '.webp': 'image/webp',
-  '.avif': 'image/avif',
-  '.pdf': 'application/pdf',
-  '.txt': 'text/plain'
-};
-
-const CONTENT_TYPE_BY_EXT = (name) => CONTENT_TYPES[path.extname(String(name)).toLowerCase()] || 'application/octet-stream';
+const { contentTypeOf } = require('../mime');
 
 /** pathname → media 根内的绝对路径；越界或非法即抛错 */
 function safeResolve(mediaRoot, pathname) {
@@ -95,7 +83,7 @@ function createLocalStorage() {
           url: `/media/${pathname}`,
           size: stat.size,
           uploadedAt: stat.mtime.toISOString(),
-          contentType: CONTENT_TYPE_BY_EXT(pathname)
+          contentType: contentTypeOf(pathname)
         };
       });
       const next = offset + page.length;
@@ -116,9 +104,9 @@ function createLocalStorage() {
     async read(ref) {
       const target = safeResolve(mediaRoot, toPathname(ref));
       const body = await fsp.readFile(target);
-      return { body, contentType: CONTENT_TYPE_BY_EXT(target) };
+      return { body, contentType: contentTypeOf(target) };
     }
   };
 }
 
-module.exports = { createLocalStorage, safeResolve, CONTENT_TYPE_BY_EXT };
+module.exports = { createLocalStorage, safeResolve, contentTypeOf };

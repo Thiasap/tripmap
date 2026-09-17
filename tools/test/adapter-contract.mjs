@@ -264,6 +264,101 @@ await test('local·storage：路径穿越与非法路径必须拒绝', async () 
 
 try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* 临时目录清理失败不影响结论 */ }
 
+// ---------- S3 兼容实现契约（桩：aws4fetch） ----------
+process.stdout.write('\ns3 storage adapter contract（桩：aws4fetch）\n');
+const s3Calls = [];
+let s3Responder = () => new Response('', { status: 200 });
+class FakeAwsClient {
+  constructor(options) { this.options = options; s3Calls.push({ kind: 'client', options }); }
+  async fetch(url, options = {}) {
+    s3Calls.push({ kind: 'fetch', url: String(url), method: options.method || 'GET', body: options.body, headers: options.headers || {} });
+    return s3Responder(String(url), options);
+  }
+}
+const aws4fetchPath = require.resolve('aws4fetch');
+require.cache[aws4fetchPath] = { id: aws4fetchPath, filename: aws4fetchPath, loaded: true, exports: { AwsClient: FakeAwsClient } };
+
+const R2_ENV = {
+  TRIPMAP_STORAGE: 's3',
+  R2_ACCOUNT_ID: 'acct123',
+  R2_BUCKET: 'tripmap-media',
+  R2_ACCESS_KEY_ID: 'test-key',
+  R2_SECRET_ACCESS_KEY: 'test-secret',
+  R2_PUBLIC_BASE_URL: 'https://pub-test.r2.dev'
+};
+
+await test('s3·缺少 R2 环境变量必须抛错（不静默回退）', () => {
+  let threw = false;
+  try {
+    fresh(storageAdapterPath, { TRIPMAP_STORAGE: 's3', R2_ACCOUNT_ID: '', R2_BUCKET: '', R2_ACCESS_KEY_ID: '', R2_SECRET_ACCESS_KEY: '', R2_PUBLIC_BASE_URL: '' }).createStorage();
+  } catch { threw = true; }
+  assert(threw, '缺配置应抛错');
+});
+
+const s3 = fresh(storageAdapterPath, R2_ENV).createStorage();
+
+await test('s3·put：PUT 到 <endpoint>/<bucket>/<key>，键逐段编码，返回公开 URL', async () => {
+  s3Calls.length = 0;
+  s3Responder = () => new Response('', { status: 200 });
+  const out = await s3.put('album/t1/a b.jpg', Buffer.from('hello'), { contentType: 'image/jpeg' });
+  const call = s3Calls.find((item) => item.kind === 'fetch');
+  equal(call.method, 'PUT', '应使用 PUT');
+  equal(call.url, 'https://acct123.r2.cloudflarestorage.com/tripmap-media/album/t1/a%20b.jpg', 'URL 形状与键编码应正确');
+  equal(call.headers['content-type'], 'image/jpeg', 'contentType 应透传');
+  equal(out.url, 'https://pub-test.r2.dev/album/t1/a b.jpg', '应返回公开 URL');
+});
+
+await test('s3·list：解析 ListObjectsV2 XML 并返回续页 token', async () => {
+  s3Calls.length = 0;
+  s3Responder = () => new Response(
+    '<?xml version="1.0"?><ListBucketResult>' +
+    '<Contents><Key>album/t1/a.jpg</Key><Size>123</Size><LastModified>2026-09-17T10:00:00.000Z</LastModified></Contents>' +
+    '<Contents><Key>album/t1/thumb_a.jpg.jpg</Key><Size>5</Size><LastModified>2026-09-17T10:01:00.000Z</LastModified></Contents>' +
+    '<IsTruncated>true</IsTruncated><NextContinuationToken>TOKEN2</NextContinuationToken></ListBucketResult>',
+    { status: 200, headers: { 'content-type': 'application/xml' } }
+  );
+  const page = await s3.list({ prefix: 'album/t1/', limit: 2 });
+  const call = s3Calls.find((item) => item.kind === 'fetch');
+  assert(call.url.includes('list-type=2') && call.url.includes('prefix=album%2Ft1%2F') && call.url.includes('max-keys=2'), '应带 list-type / prefix / max-keys');
+  equal(page.blobs.length, 2, '应解析出 2 个对象');
+  equal(page.blobs[0].pathname, 'album/t1/a.jpg', 'pathname 应还原');
+  equal(page.blobs[0].size, 123, 'size 应解析');
+  equal(page.blobs[0].url, 'https://pub-test.r2.dev/album/t1/a.jpg', 'url 应基于公开基址');
+  equal(page.cursor, 'TOKEN2', '截断时应返回续页 token');
+});
+
+await test('s3·del：按公开 URL / pathname 删除，404 视为已删除', async () => {
+  s3Calls.length = 0;
+  s3Responder = () => new Response(null, { status: 204 });
+  await s3.del(['https://pub-test.r2.dev/album/t1/a.jpg', 'album/t1/thumb_a.jpg.jpg']);
+  const deletes = s3Calls.filter((item) => item.kind === 'fetch');
+  equal(deletes.length, 2, '应发两次 DELETE');
+  assert(deletes.every((item) => item.method === 'DELETE'), '应使用 DELETE');
+  equal(deletes[0].url, 'https://acct123.r2.cloudflarestorage.com/tripmap-media/album/t1/a.jpg', '应从公开 URL 还原对象键');
+
+  s3Responder = () => new Response('not found', { status: 404 });
+  await s3.del(['album/t1/gone.jpg']);
+});
+
+await test('s3·read：返回 Buffer 与 contentType', async () => {
+  s3Calls.length = 0;
+  s3Responder = () => new Response('abc', { status: 200, headers: { 'content-type': 'image/jpeg' } });
+  const out = await s3.read({ url: 'https://pub-test.r2.dev/album/t1/a.jpg' });
+  equal(out.body.toString(), 'abc', '内容应逐字节一致');
+  equal(out.contentType, 'image/jpeg', 'contentType 应透传');
+});
+
+await test('s3·非法路径必须拒绝', async () => {
+  let rejected = 0;
+  for (const bad of ['/abs.jpg', 'C:/x.jpg', 'a\\b.jpg', 'a\0b.jpg']) {
+    try { await s3.put(bad, Buffer.from('x')); } catch { rejected += 1; }
+  }
+  equal(rejected, 4, '4 种非法路径都应被拒绝');
+});
+
+// 清理 S3 段留下的环境变量，避免影响后面的护栏用例（护栏依赖默认值推导）
+delete process.env.TRIPMAP_STORAGE;
+
 await test('护栏：未知后端模式必须抛错（不静默回退）', () => {
   const mod = fresh(dbAdapterPath, { TRIPMAP_BACKEND: 'sqlite-maybe' });
   let threw = false;
@@ -281,6 +376,7 @@ await test('护栏：生产环境禁止 local 后端（数据库与存储都要�
 });
 
 process.env.TRIPMAP_BACKEND = 'cloud';
+delete process.env.TRIPMAP_STORAGE;
 delete process.env.VERCEL_ENV;
 
 console.log('\n' + pass + ' 通过，' + fail + ' 失败');

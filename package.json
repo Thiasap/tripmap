@@ -19,6 +19,7 @@
   "dependencies": {
     "@neondatabase/serverless": "^0.10.0",
     "@vercel/blob": "^0.23.0",
+    "aws4fetch": "^1.0.20",
     "d3": "^7.9.0",
     "express": "^4.21.2",
     "glightbox": "^3.3.1",
