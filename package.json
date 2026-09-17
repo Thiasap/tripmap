@@ -12,6 +12,9 @@
     "backup": "node tools/backup/run-all.mjs",
     "backup:verify": "node tools/backup/verify-backup.mjs"
   },
+  "engines": {
+    "node": "22.x"
+  },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.0",
     "@vercel/blob": "^0.23.0",
