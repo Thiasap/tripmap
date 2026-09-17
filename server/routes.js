@@ -51,9 +51,17 @@ const MB = 1024 * 1024;
 
 function fileFilter(req, file, cb) {
   const ext = path.extname(file.originalname).toLowerCase();
-  if (!SAFE_EXT.has(ext)) return cb(new Error(`不支持的文件类型: ${ext}`));
+  if (!SAFE_EXT.has(ext)) {
+    // 标记为客户端错误：否则会被全局处理器当成 500「服务器内部错误」，
+    // 用户看不到真实原因
+    const error = new Error(`不支持的文件类型: ${ext || '（无扩展名）'}`);
+    error.status = 400;
+    return cb(error);
+  }
   if (file.fieldname !== 'attachments' && !IMAGE_MIMES.has(file.mimetype)) {
-    return cb(new Error(`仅支持图片格式: ${file.mimetype}`));
+    const error = new Error(`仅支持图片格式: ${file.mimetype}`);
+    error.status = 400;
+    return cb(error);
   }
   cb(null, true);
 }
@@ -95,14 +103,29 @@ function safeName(name) {
 
 function normalizeTrip(row) {
   if (!row) return null;
-  return {
-    ...row,
-    cover_meta: row.cover_meta ? JSON.parse(row.cover_meta) : null
-  };
+  let coverMeta = null;
+  try {
+    coverMeta = row.cover_meta ? JSON.parse(row.cover_meta) : null;
+  } catch {
+    // 历史脏数据不应导致整条记录读取失败
+    coverMeta = null;
+  }
+  return { ...row, cover_meta: coverMeta };
+}
+
+/** 参与次数：只接受 >= 0 的整数，非法值返回 null 由调用方拒绝 */
+function parseCount(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const number = parseInt(value, 10);
+  return Number.isFinite(number) && number >= 0 ? number : null;
 }
 
 async function processImageBuffer(buffer, options = {}) {
-  const image = sharp(buffer).rotate();
+  const image = sharp(buffer)
+    // 按 EXIF 自动旋转，避免竖拍照片方向错误
+    .rotate()
+    // 透明 PNG/GIF 转 JPEG 时铺白底，否则透明区域会变成黑底
+    .flatten({ background: '#ffffff' });
   if (options.resize) image.resize(options.resize);
   return image.jpeg({ quality: options.quality || 82, mozjpeg: true }).toBuffer();
 }
@@ -112,17 +135,18 @@ async function saveUploads(id, files = {}) {
   let coverMeta = null;
 
   if (files.cover?.[0]) {
-    const metadata = await sharp(files.cover[0].buffer).metadata();
     const processed = await processImageBuffer(files.cover[0].buffer, {
       resize: { width: 1400, withoutEnlargement: true },
       quality: 78
     });
+    // 从处理后的图读取尺寸：原图 metadata 不含 EXIF 旋转，竖拍照片宽高会颠倒
+    const outputMeta = await sharp(processed).metadata();
     const blob = await put(`album/${id}/cover_${id}.jpg`, processed, {
       access: 'public',
       contentType: 'image/jpeg'
     });
     coverPath = blob.url;
-    coverMeta = { width: metadata.width || 4, height: metadata.height || 3 };
+    coverMeta = { width: outputMeta.width || 4, height: outputMeta.height || 3 };
   }
 
   for (const file of files.album || []) {
@@ -182,12 +206,72 @@ async function fileList(prefix) {
   }
 }
 
-async function deleteBlobsByPrefix(prefix) {
-  try {
-    const blobs = await listAllByPrefix(prefix);
-    const urls = blobs.map((b) => b.url).filter(Boolean);
-    if (urls.length) await del(urls);
-  } catch { /* 对象可能已被删除 */ }
+/**
+ * 回收：把待删除对象复制到 recycle/<时间戳>/<原路径> 后再删除原对象。
+ *
+ * 与本地版「移动而不是删除」的语义对齐——Blob 没有 rename，只能复制后删除。
+ * 单个对象复制失败时保留其原对象不删，宁可留下冗余也不丢数据。
+ *
+ * @returns {{ recyclePath: string, moved: Array<{from: string, to: string}>, failed: number }}
+ */
+async function recycleBlobs(blobs, { concurrency = 4 } = {}) {
+  const targets = (blobs || []).filter((b) => b && b.url && b.pathname);
+  const stamp = timestampName();
+  if (!targets.length) return { recyclePath: '', moved: [], failed: 0 };
+
+  const moved = [];
+  let failed = 0;
+
+  let index = 0;
+  const workers = Array.from({ length: Math.min(concurrency, targets.length) }, async () => {
+    while (true) {
+      const current = index;
+      index += 1;
+      if (current >= targets.length) return;
+      const blob = targets[current];
+      const target = `recycle/${stamp}/${blob.pathname}`;
+      try {
+        const response = await fetch(blob.url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const buffer = Buffer.from(await response.arrayBuffer());
+        await put(target, buffer, {
+          access: 'public',
+          contentType: response.headers.get('content-type') || 'application/octet-stream'
+        });
+        moved.push({ from: blob.pathname, to: target });
+      } catch {
+        // 复制失败：保留原对象，不执行删除
+        failed += 1;
+      }
+    }
+  });
+  await Promise.all(workers);
+
+  const urlsToDelete = moved
+    .map((item) => targets.find((b) => b.pathname === item.from)?.url)
+    .filter(Boolean);
+  if (urlsToDelete.length) {
+    try { await del(urlsToDelete); } catch { /* 原对象残留不影响使用，下次清理会重试 */ }
+  }
+
+  return { recyclePath: `recycle/${stamp}`, moved, failed };
+}
+
+/** 与本地版 timestampName 保持一致的目录命名 */
+function timestampName(date = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
+}
+
+/** 列出某个旅行在各前缀下的全部对象 */
+async function blobsForTrip(tripId) {
+  const out = [];
+  for (const prefix of [`album/${tripId}/`, `attachments/${tripId}/`, `richtext_images/${tripId}/`]) {
+    try {
+      out.push(...await listAllByPrefix(prefix));
+    } catch { /* 忽略单个前缀失败 */ }
+  }
+  return out;
 }
 
 /** 分页列出某个 prefix 下的全部对象（单次 list 上限 1000，必须翻页） */
@@ -205,37 +289,70 @@ async function listAllByPrefix(prefix) {
   return all;
 }
 
+/** 未保存的富文本草稿图保留时长：避免清理掉用户正在编辑的内容 */
+const DRAFT_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 清理孤立媒体。判定规则与本地版一致：
+ * 1. 所属旅行已不存在的目录（draft 除外）→ 回收
+ * 2. richtext_images/draft 中超过 24 小时宽限期的对象 → 回收
+ * 3. 富文本正文未引用的 richtext_images 对象 → 回收
+ * 4. 原图已不存在的缩略图（thumb_ 前缀）→ 回收
+ * 其余（存在旅行的相册、附件、被引用的富文本图）一律保留。
+ */
 async function cleanupMediaFiles() {
-  const trips = await sql`SELECT id FROM trips`;
+  const trips = await sql`SELECT id, cover_path, rich_text_path FROM trips`;
   const tripIds = new Set(trips.map(t => t.id));
 
-  // 收集所有媒体对象，按 tripId 归组
-  const byTrip = new Map();
+  // 收集所有媒体对象
+  const all = [];
   for (const prefix of ['album/', 'richtext_images/', 'attachments/']) {
-    let blobs = [];
     try {
-      blobs = await listAllByPrefix(prefix);
+      all.push(...await listAllByPrefix(prefix));
     } catch { /* 单个前缀失败不影响其他前缀 */ }
-    for (const blob of blobs) {
-      const parts = blob.pathname.split('/');
-      const tripId = parts[1];
-      if (!tripId) continue;
-      if (!byTrip.has(tripId)) byTrip.set(tripId, []);
-      byTrip.get(tripId).push(blob);
+  }
+
+  // 被引用的 URL：封面 + 富文本正文中出现的媒体地址
+  const keep = new Set();
+  for (const trip of trips) {
+    if (trip.cover_path) keep.add(String(trip.cover_path));
+    const html = String(trip.rich_text_path || '');
+    if (!html) continue;
+    for (const match of html.matchAll(/https?:\/\/[^"'\s<>)]+/g)) keep.add(match[0]);
+  }
+
+  const pathnames = new Set(all.map((b) => b.pathname));
+  const now = Date.now();
+  const targets = [];
+
+  for (const blob of all) {
+    const parts = String(blob.pathname).split('/');
+    const root = parts[0];
+    const tripId = parts[1];
+    const name = parts[parts.length - 1];
+    if (!tripId || !name) continue;
+
+    const isDraft = root === 'richtext_images' && tripId === 'draft';
+    const orphanTripDir = !tripIds.has(tripId) && !isDraft;
+    const uploadedAt = blob.uploadedAt ? new Date(blob.uploadedAt).getTime() : 0;
+    const draftExpired = isDraft && uploadedAt > 0 && now - uploadedAt > DRAFT_GRACE_MS;
+    const unusedRichText = root === 'richtext_images' && !isDraft && !keep.has(blob.url);
+    // 缩略图命名规则为 thumb_<原文件名>.jpg
+    const orphanThumb = name.startsWith('thumb_') &&
+      !pathnames.has(`${blob.pathname.slice(0, blob.pathname.length - name.length)}${name.slice(6, -4)}`);
+
+    if (orphanTripDir || draftExpired || unusedRichText || orphanThumb) {
+      targets.push(blob);
     }
   }
 
-  // 删除所属旅行已不存在的全部对象（原图、缩略图、封面）
-  const removed = [];
-  for (const [tripId, blobs] of byTrip) {
-    if (tripIds.has(tripId)) continue;
-    const urls = blobs.map((b) => b.url).filter(Boolean);
-    if (!urls.length) continue;
-    await del(urls);
-    for (const blob of blobs) removed.push({ pathname: blob.pathname, deleted: true });
-  }
-
-  return { moved_count: removed.length, moved: removed };
+  const result = await recycleBlobs(targets);
+  return {
+    recycle_path: result.recyclePath,
+    moved_count: result.moved.length,
+    moved: result.moved,
+    failed_count: result.failed
+  };
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -316,14 +433,63 @@ router.get('/trips/:id/files', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+/**
+ * 新建旅行时富文本插图先上传到 richtext_images/draft/，保存时迁移到旅行自己的目录，
+ * 并把 HTML 中的 URL 一并改写。
+ *
+ * 为什么必须迁移：
+ * 1. 图片若永远留在 draft 伪目录，删除旅行时不会随旅行一起清理，成为永久孤儿；
+ * 2. 清理任务把 draft 当作「旅行已不存在」的目录，可能删除刚上传、尚未保存的图片。
+ *
+ * Blob 不支持 rename，因此走「读取 → 写入新路径 → 删除旧对象 → 改写 URL」。
+ * 单张迁移失败时保留原 URL，宁可留下孤儿也不丢图。
+ */
+async function migrateDraftImages(tripId, html) {
+  const draftPrefix = 'richtext_images/draft/';
+  let result = String(html || '');
+  if (!result.includes(draftPrefix) || !tripId || tripId === 'draft') return result;
+
+  let draftBlobs = [];
+  try {
+    draftBlobs = await listAllByPrefix(draftPrefix);
+  } catch {
+    return result;
+  }
+  if (!draftBlobs.length) return result;
+
+  const urlsToDelete = [];
+  for (const blob of draftBlobs) {
+    if (!blob.url || !result.includes(blob.url)) continue;
+    const name = blob.pathname.slice(draftPrefix.length);
+    if (!name) continue;
+    try {
+      const response = await fetch(blob.url);
+      if (!response.ok) continue;
+      const buffer = Buffer.from(await response.arrayBuffer());
+      const uploaded = await put(`richtext_images/${tripId}/${name}`, buffer, {
+        access: 'public',
+        contentType: response.headers.get('content-type') || 'application/octet-stream'
+      });
+      result = result.split(blob.url).join(uploaded.url);
+      urlsToDelete.push(blob.url);
+    } catch { /* 保留原 URL，避免图片链接失效 */ }
+  }
+
+  if (urlsToDelete.length) {
+    try { await del(urlsToDelete); } catch { /* 旧对象残留不影响使用，清理任务会回收 */ }
+  }
+  return result;
+}
+
 router.post('/trips', requireAdmin, tripFields, async (req, res, next) => {
   try {
     const now = new Date().toISOString();
     const id = await makeTripId(req.body.province, req.body.city);
     const saved = await saveUploads(id, req.files);
+    const richText = await migrateDraftImages(id, sanitizeRichText(req.body.rich_text));
     await sql`
       INSERT INTO trips (id, name, province, city, address_detail, latitude, longitude, start_date, end_date, participants, rich_text_path, album_path, attachments_path, cover_path, cover_meta, card_position_x, card_position_y, created_at, updated_at)
-      VALUES (${id}, ${req.body.name || ''}, ${req.body.province || ''}, ${req.body.city || ''}, ${req.body.address_detail || ''}, ${roundCoordinate(req.body.latitude)}, ${roundCoordinate(req.body.longitude)}, ${req.body.start_date || ''}, ${req.body.end_date || ''}, ${req.body.participants || ''}, ${sanitizeRichText(req.body.rich_text)}, ${''}, ${''}, ${saved.cover_path || ''}, ${saved.cover_meta ? JSON.stringify(saved.cover_meta) : ''}, ${clampNumber(req.body.card_position_x, -180, 180, 104)}, ${clampNumber(req.body.card_position_y, -90, 90, 35)}, ${now}, ${now})
+      VALUES (${id}, ${req.body.name || ''}, ${req.body.province || ''}, ${req.body.city || ''}, ${req.body.address_detail || ''}, ${roundCoordinate(req.body.latitude)}, ${roundCoordinate(req.body.longitude)}, ${req.body.start_date || ''}, ${req.body.end_date || ''}, ${req.body.participants || ''}, ${richText}, ${''}, ${''}, ${saved.cover_path || ''}, ${saved.cover_meta ? JSON.stringify(saved.cover_meta) : ''}, ${clampNumber(req.body.card_position_x, -180, 180, 104)}, ${clampNumber(req.body.card_position_y, -90, 90, 35)}, ${now}, ${now})
     `;
     const rows = await sql`SELECT * FROM trips WHERE id = ${id}`;
     res.status(201).json(normalizeTrip(rows[0]));
@@ -347,7 +513,7 @@ router.put('/trips/:id', requireAdmin, tripFields, async (req, res, next) => {
         start_date = ${req.body.start_date ?? cur.start_date},
         end_date = ${req.body.end_date ?? cur.end_date},
         participants = ${req.body.participants ?? cur.participants},
-        rich_text_path = ${req.body.rich_text === undefined ? cur.rich_text_path : sanitizeRichText(req.body.rich_text)},
+        rich_text_path = ${req.body.rich_text === undefined ? cur.rich_text_path : await migrateDraftImages(req.params.id, sanitizeRichText(req.body.rich_text))},
         album_path = ${cur.album_path},
         attachments_path = ${cur.attachments_path},
         cover_path = ${saved.cover_path || cur.cover_path},
@@ -370,13 +536,13 @@ router.delete('/trips/:id/files', requireAdmin, async (req, res, next) => {
       return res.status(400).json({ error: 'Invalid type or name' });
     }
     // 注意：@vercel/blob 的 del() 只接受完整 URL，传 pathname 会静默失败。
-    // 因此先按 prefix 列出对象、精确匹配 pathname，再删除其 URL。
+    // 因此先按 prefix 列出对象、精确匹配 pathname，再处理其 URL。
     const targets = [];
     const collect = async (pathname) => {
       try {
-        const { blobs } = await list({ prefix: pathname, limit: 20 });
+        const blobs = await listAllByPrefix(pathname);
         for (const blob of blobs) {
-          if (blob.pathname === pathname) targets.push(blob.url);
+          if (blob.pathname === pathname) targets.push(blob);
         }
       } catch { /* 对象可能已不存在 */ }
     };
@@ -384,8 +550,9 @@ router.delete('/trips/:id/files', requireAdmin, async (req, res, next) => {
     if (type === 'album') {
       await collect(`${type}/${req.params.id}/thumb_${safeName(name)}.jpg`);
     }
-    if (targets.length) await del(targets);
-    res.status(204).end();
+    // 回收而非直接删除：Blob 删除不可逆，用户误删后无法找回
+    const result = await recycleBlobs(targets);
+    res.json({ recycle_path: result.recyclePath, moved_count: result.moved.length, failed_count: result.failed });
   } catch (e) { next(e); }
 });
 
@@ -393,13 +560,11 @@ router.delete('/trips/:id', requireAdmin, async (req, res, next) => {
   try {
     const rows = await sql`SELECT id FROM trips WHERE id = ${req.params.id}`;
     if (!rows.length) return res.status(404).json({ error: 'Trip not found' });
+    // 先回收媒体，再删除数据库记录：回收失败时保留记录，避免出现无法追踪的孤儿文件
+    const blobs = await blobsForTrip(req.params.id);
+    const result = await recycleBlobs(blobs);
     await sql`DELETE FROM trips WHERE id = ${req.params.id}`;
-    await Promise.all([
-      deleteBlobsByPrefix(`album/${req.params.id}/`),
-      deleteBlobsByPrefix(`attachments/${req.params.id}/`),
-      deleteBlobsByPrefix(`richtext_images/${req.params.id}/`)
-    ]);
-    res.status(204).end();
+    res.json({ recycle_path: result.recyclePath, moved_count: result.moved.length, failed_count: result.failed });
   } catch (e) { next(e); }
 });
 
@@ -441,15 +606,16 @@ router.post('/participants/batch', requireAdmin, async (req, res, next) => {
     const names = [...new Set((req.body.names || []).map(n => String(n).trim()).filter(Boolean))];
     if (!names.length) return res.json({ processed: 0 });
     const now = new Date().toISOString();
-    for (const name of names) {
-      await sql`
+    // 单事务提交，保证批量写入的原子性；任一失败则整体回滚
+    await sql.transaction(
+      names.map((name) => sql`
         INSERT INTO participants (name, last_participated_at, count)
         VALUES (${name}, ${now}, 1)
         ON CONFLICT (name) DO UPDATE SET
           last_participated_at = EXCLUDED.last_participated_at,
           count = participants.count + 1
-      `;
-    }
+      `)
+    );
     res.json({ processed: names.length });
   } catch (e) { next(e); }
 });
@@ -461,7 +627,8 @@ router.post('/participants', requireAdmin, async (req, res, next) => {
     const existing = await sql`SELECT id FROM participants WHERE name = ${name}`;
     if (existing.length) return res.status(409).json({ error: 'Participant already exists' });
     const lastParticipatedAt = req.body.last_participated_at || new Date().toISOString();
-    const count = req.body.count === undefined || req.body.count === '' ? 0 : parseInt(req.body.count);
+    const count = req.body.count === undefined || req.body.count === '' ? 0 : parseCount(req.body.count);
+    if (count === null) return res.status(400).json({ error: 'Invalid count' });
     const rows = await sql`
       INSERT INTO participants (name, last_participated_at, count)
       VALUES (${name}, ${lastParticipatedAt}, ${count})
@@ -477,8 +644,10 @@ router.put('/participants/:id', requireAdmin, async (req, res, next) => {
     if (!existing.length) return res.status(404).json({ error: 'Not found' });
     const cur = existing[0];
     const name = String(req.body.name ?? cur.name).trim();
+    if (!name) return res.status(400).json({ error: 'Name is required' });
     const lastParticipatedAt = req.body.last_participated_at || cur.last_participated_at;
-    const count = req.body.count === undefined || req.body.count === '' ? cur.count : parseInt(req.body.count);
+    const count = req.body.count === undefined || req.body.count === '' ? cur.count : parseCount(req.body.count);
+    if (count === null) return res.status(400).json({ error: 'Invalid count' });
     const rows = await sql`
       UPDATE participants SET name = ${name}, last_participated_at = ${lastParticipatedAt}, count = ${count}
       WHERE id = ${req.params.id}

@@ -50,9 +50,10 @@ async function cleanupMedia() {
     const res = await fetch('/api/cleanup-media', { method: 'POST' });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
+    const failedNote = data.failed_count ? `\n（${data.failed_count} 个文件回收失败，已保留原文件）` : '';
     cleanupResult.textContent = data.moved_count
-      ? `已移动 ${data.moved_count} 个文件到 ${data.recycle_path}\n\n${data.moved.map((item) => `${item.from} -> ${item.to}`).join('\n')}`
-      : '没有发现需要清理的文件。';
+      ? `已回收 ${data.moved_count} 个文件到 ${data.recycle_path}${failedNote}\n\n${data.moved.map((item) => `${item.from} -> ${item.to}`).join('\n')}`
+      : `没有发现需要清理的文件。${failedNote}`;
   } catch (error) {
     cleanupResult.textContent = error.message;
   } finally {

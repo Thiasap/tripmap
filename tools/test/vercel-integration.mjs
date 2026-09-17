@@ -150,13 +150,26 @@ async function sqlStub(strings, ...values) {
   return [];
 }
 
+// Neon 的 sql.transaction()：桩实现按顺序执行全部语句
+sqlStub.transaction = async (queries) => {
+  const results = [];
+  for (const query of queries) results.push(await query);
+  return results;
+};
+
 // 内存 Blob 桩
 // del 严格模拟真实 API：只接受完整 URL（http 开头），传 pathname 必须报错。
 // 这样一旦有人回退成传 pathname，测试会立刻失败。
 const blobs = new Map();
 const blobStub = {
   put: async (pathname, body, options) => {
-    blobs.set(pathname, { pathname, size: body?.length ?? 0, contentType: options?.contentType });
+    blobs.set(pathname, {
+      pathname,
+      body: Buffer.isBuffer(body) ? Buffer.from(body) : Buffer.from(String(body ?? '')),
+      size: body?.length ?? 0,
+      contentType: options?.contentType,
+      uploadedAt: new Date().toISOString()
+    });
     return { url: `https://fake.blob.invalid/${pathname}` };
   },
   del: async (target) => {
@@ -174,6 +187,23 @@ const blobStub = {
     blobs: [...blobs.values()].filter((b) => b.pathname.startsWith(prefix))
       .map((b) => ({ ...b, url: `https://fake.blob.invalid/${b.pathname}` }))
   })
+};
+
+// 拦截对假域名的 fetch：回收流程需要把对象读出来再写到 recycle/ 前缀，
+// 测试里应由内存桩提供内容，而不是真的发网络请求。
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (input, init) => {
+  const url = typeof input === 'string' ? input : input?.url ?? String(input);
+  if (url.startsWith('https://fake.blob.invalid/')) {
+    const pathname = decodeURIComponent(url.slice('https://fake.blob.invalid/'.length));
+    const entry = blobs.get(pathname);
+    if (!entry) return new Response('not found', { status: 404 });
+    return new Response(entry.body, {
+      status: 200,
+      headers: { 'content-type': entry.contentType || 'application/octet-stream' }
+    });
+  }
+  return realFetch(input, init);
 };
 
 // 注入桩模块
@@ -198,16 +228,16 @@ const app = require(path.join(projectRoot, 'api', 'index.js'));
 let server;
 let baseUrl;
 
-function request(method, pathname, { body, headers = {}, cookie } = {}) {
+function request(method, pathname, { body, raw, contentType, headers = {}, cookie } = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(pathname, baseUrl);
-    const payload = body === undefined ? null : Buffer.from(JSON.stringify(body));
+    const payload = raw ?? (body === undefined ? null : Buffer.from(JSON.stringify(body)));
     const req = http.request(
       url,
       {
         method,
         headers: {
-          ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': payload.length } : {}),
+          ...(payload ? { 'Content-Type': contentType || 'application/json', 'Content-Length': payload.length } : {}),
           ...(cookie ? { Cookie: cookie } : {}),
           ...headers
         }
@@ -227,6 +257,24 @@ function request(method, pathname, { body, headers = {}, cookie } = {}) {
     if (payload) req.write(payload);
     req.end();
   });
+}
+
+/** 构造 multipart/form-data 请求体，用于测试文件上传 */
+function multipart(fields) {
+  const boundary = `----tripmapTest${Math.random().toString(16).slice(2)}`;
+  const chunks = [];
+  for (const field of fields) {
+    let header = `--${boundary}\r\nContent-Disposition: form-data; name="${field.name}"`;
+    if (field.filename) header += `; filename="${field.filename}"`;
+    header += '\r\n';
+    if (field.contentType) header += `Content-Type: ${field.contentType}\r\n`;
+    header += '\r\n';
+    chunks.push(Buffer.from(header, 'utf8'));
+    chunks.push(Buffer.isBuffer(field.data) ? field.data : Buffer.from(String(field.data), 'utf8'));
+    chunks.push(Buffer.from('\r\n', 'utf8'));
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+  return { raw: Buffer.concat(chunks), contentType: `multipart/form-data; boundary=${boundary}` };
 }
 
 function loginCookieFrom(res) {
@@ -368,10 +416,10 @@ async function main() {
 
   process.stdout.write('\n媒体\n');
 
-  await test('删除相册文件时按 URL 精确删除原图与缩略图', async () => {
+  await test('删除相册文件时回收原图与缩略图（复制到 recycle/ 后再删）', async () => {
     const tripId = createdTripId;
-    blobs.set(`album/${tripId}/photo.jpg`, { pathname: `album/${tripId}/photo.jpg`, size: 10, contentType: 'image/jpeg' });
-    blobs.set(`album/${tripId}/thumb_photo.jpg.jpg`, { pathname: `album/${tripId}/thumb_photo.jpg.jpg`, size: 5, contentType: 'image/jpeg' });
+    blobs.set(`album/${tripId}/photo.jpg`, { pathname: `album/${tripId}/photo.jpg`, size: 10, contentType: 'image/jpeg', uploadedAt: new Date().toISOString() });
+    blobs.set(`album/${tripId}/thumb_photo.jpg.jpg`, { pathname: `album/${tripId}/thumb_photo.jpg.jpg`, size: 5, contentType: 'image/jpeg', uploadedAt: new Date().toISOString() });
 
     const before = await request('GET', `/api/trips/${tripId}/files`);
     assert.equal(before.json.album.length, 1, '应能列出刚放入的相册图');
@@ -379,9 +427,57 @@ async function main() {
     const res = await request('DELETE', `/api/trips/${tripId}/files?type=album&name=${encodeURIComponent('photo.jpg')}`, {
       cookie: adminCookie
     });
-    assert.equal(res.status, 204);
-    assert.equal(blobs.has(`album/${tripId}/photo.jpg`), false, '原图应被删除');
-    assert.equal(blobs.has(`album/${tripId}/thumb_photo.jpg.jpg`), false, '缩略图应被删除');
+    assert.equal(res.status, 200);
+    assert.equal(res.json.moved_count, 2, '原图与缩略图都应被回收');
+    assert.ok(String(res.json.recycle_path).startsWith('recycle/'), '应返回回收目录');
+    assert.equal(blobs.has(`album/${tripId}/photo.jpg`), false, '原图应从原位移除');
+    assert.equal(blobs.has(`album/${tripId}/thumb_photo.jpg.jpg`), false, '缩略图应从原位移除');
+    const recycled = [...blobs.keys()].filter((k) => k.startsWith(`${res.json.recycle_path}/album/${tripId}/`));
+    assert.equal(recycled.length, 2, '回收目录中应有 2 个可恢复对象');
+  });
+
+  await test('删除旅行时回收其全部媒体后再删记录', async () => {
+    const createRes = await request('POST', '/api/trips', {
+      cookie: adminCookie,
+      body: { name: '待删除旅行', province: '某省', city: '某市' }
+    });
+    const doomedId = createRes.json.id;
+    blobs.set(`album/${doomedId}/a.jpg`, { pathname: `album/${doomedId}/a.jpg`, size: 3, contentType: 'image/jpeg', uploadedAt: new Date().toISOString() });
+    blobs.set(`attachments/${doomedId}/b.pdf`, { pathname: `attachments/${doomedId}/b.pdf`, size: 4, contentType: 'application/pdf', uploadedAt: new Date().toISOString() });
+
+    const res = await request('DELETE', `/api/trips/${doomedId}`, { cookie: adminCookie });
+    assert.equal(res.status, 200);
+    assert.equal(res.json.moved_count, 2);
+    const list = await request('GET', '/api/trips');
+    assert.equal(list.json.some((t) => t.id === doomedId), false, '旅行记录应已删除');
+    const recycledAlbum = [...blobs.keys()].filter((k) => k === `${res.json.recycle_path}/album/${doomedId}/a.jpg`);
+    const recycledAttachment = [...blobs.keys()].filter((k) => k === `${res.json.recycle_path}/attachments/${doomedId}/b.pdf`);
+    assert.equal(recycledAlbum.length, 1, '相册图应可在回收目录中找回');
+    assert.equal(recycledAttachment.length, 1, '附件应可在回收目录中找回');
+  });
+
+  await test('清理接口返回与前端约定的字段', async () => {
+    const res = await request('POST', '/api/cleanup-media', { cookie: adminCookie });
+    assert.equal(res.status, 200);
+    assert.ok('recycle_path' in res.json, '应含 recycle_path');
+    assert.ok('moved_count' in res.json, '应含 moved_count');
+    assert.ok(Array.isArray(res.json.moved), '应含 moved 数组');
+  });
+
+  await test('清理不会回收仍存在旅行的相册图', async () => {
+    blobs.set(`album/${createdTripId}/keep.jpg`, { pathname: `album/${createdTripId}/keep.jpg`, size: 9, contentType: 'image/jpeg', uploadedAt: new Date().toISOString() });
+    const res = await request('POST', '/api/cleanup-media', { cookie: adminCookie });
+    assert.equal(res.status, 200);
+    assert.equal(blobs.has(`album/${createdTripId}/keep.jpg`), true, '存在旅行的相册图必须保留');
+    assert.equal(res.json.moved.some((m) => m.from.includes('/keep.jpg')), false);
+  });
+
+  await test('清理会回收原图已丢失的孤儿缩略图', async () => {
+    const orphanThumb = `album/${createdTripId}/thumb_ghost.jpg.jpg`;
+    blobs.set(orphanThumb, { pathname: orphanThumb, size: 2, contentType: 'image/jpeg', uploadedAt: new Date().toISOString() });
+    const res = await request('POST', '/api/cleanup-media', { cookie: adminCookie });
+    assert.equal(res.status, 200);
+    assert.equal(blobs.has(orphanThumb), false, '无对应原图的缩略图应被回收');
   });
 
   await test('删除接口拒绝非法 type', async () => {
@@ -397,11 +493,188 @@ async function main() {
   });
 
   await test('文件列表在无缩略图时回退为原图 URL', async () => {
-    blobs.set(`album/${createdTripId}/solo.jpg`, { pathname: `album/${createdTripId}/solo.jpg`, size: 7, contentType: 'image/jpeg' });
+    blobs.set(`album/${createdTripId}/solo.jpg`, { pathname: `album/${createdTripId}/solo.jpg`, size: 7, contentType: 'image/jpeg', uploadedAt: new Date().toISOString() });
     const res = await request('GET', `/api/trips/${createdTripId}/files`);
     const item = res.json.album.find((f) => f.name === 'solo.jpg');
     assert.ok(item, '应列出 solo.jpg');
     assert.equal(item.thumb, item.url, '无缩略图时 thumb 应回退为原图 URL');
+  });
+
+  process.stdout.write('\n参与者校验\n');
+
+  await test('新增人员拒绝负数次数', async () => {
+    const res = await request('POST', '/api/participants', {
+      cookie: adminCookie,
+      body: { name: '负数测试', count: -5 }
+    });
+    assert.equal(res.status, 400);
+  });
+
+  await test('更新人员拒绝非法次数', async () => {
+    const list = await request('GET', '/api/participants');
+    const target = list.json[0];
+    const res = await request('PUT', `/api/participants/${target.id}`, {
+      cookie: adminCookie,
+      body: { count: 'abc' }
+    });
+    assert.equal(res.status, 400);
+  });
+
+  await test('损坏的 cover_meta 不会导致读取失败', async () => {
+    const trip = tables.trips.find((t) => t.id === createdTripId);
+    trip.cover_meta = '{坏 JSON';
+    const res = await request('GET', '/api/trips');
+    assert.equal(res.status, 200);
+    const found = res.json.find((t) => t.id === createdTripId);
+    assert.equal(found.cover_meta, null, '坏 JSON 应回退为 null 而非抛错');
+  });
+
+  process.stdout.write('\n富文本草稿图迁移\n');
+
+  await test('保存旅行时草稿插图迁移到旅行目录并改写 URL', async () => {
+    // 模拟编辑器先上传到 draft 伪目录
+    const draftPath = 'richtext_images/draft/1234_pic.jpg';
+    await blobStub.put(draftPath, Buffer.from('fake-image-bytes'), { contentType: 'image/jpeg' });
+    const draftUrl = `https://fake.blob.invalid/${draftPath}`;
+    assert.equal(blobs.has(draftPath), true, '草稿对象应已写入');
+
+    const res = await request('POST', '/api/trips', {
+      cookie: adminCookie,
+      body: {
+        name: '带插图的旅行',
+        province: '插图省',
+        city: '插图市',
+        rich_text: `<p>看图</p><img src="${draftUrl}">`
+      }
+    });
+    assert.equal(res.status, 201);
+    const tripId = res.json.id;
+    const html = String(res.json.rich_text_path);
+
+    assert.ok(!html.includes('/richtext_images/draft/'), '正文不应再指向 draft 目录');
+    assert.ok(html.includes(`/richtext_images/${tripId}/`), '正文应指向旅行自己的目录');
+    assert.equal(blobs.has(draftPath), false, 'draft 中的原对象应已清理');
+    assert.equal(blobs.has(`richtext_images/${tripId}/1234_pic.jpg`), true, '图片应已迁移到旅行目录');
+  });
+
+  await test('迁移失败时保留原 URL，不丢图', async () => {
+    const missingPath = 'richtext_images/draft/missing.jpg';
+    const missingUrl = `https://fake.blob.invalid/${missingPath}`;
+    // 正文引用一个并不存在的 draft 对象
+    const res = await request('POST', '/api/trips', {
+      cookie: adminCookie,
+      body: {
+        name: '缺图旅行',
+        province: '缺图省',
+        city: '缺图市',
+        rich_text: `<img src="${missingUrl}">`
+      }
+    });
+    assert.equal(res.status, 201);
+    assert.ok(String(res.json.rich_text_path).includes(missingPath), '无法迁移时应保留原 URL');
+  });
+
+  await test('清理不会删除宽限期内的草稿图', async () => {
+    const freshDraft = 'richtext_images/draft/fresh.jpg';
+    await blobStub.put(freshDraft, Buffer.from('fresh'), { contentType: 'image/jpeg' });
+    const res = await request('POST', '/api/cleanup-media', { cookie: adminCookie });
+    assert.equal(res.status, 200);
+    assert.equal(blobs.has(freshDraft), true, '24 小时内的草稿图必须保留');
+  });
+
+  process.stdout.write('\n封面图片处理\n');
+
+  const sharp = require('sharp');
+
+  await test('透明 PNG 封面转 JPEG 后铺白底而非黑底', async () => {
+    // 生成中间透明、边缘不透明的 PNG
+    const transparentPng = await sharp({
+      create: { width: 40, height: 20, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } }
+    }).png().toBuffer();
+
+    const form = multipart([{ name: 'cover', filename: 'transparent.png', contentType: 'image/png', data: transparentPng }]);
+    const res = await request('POST', '/api/trips', {
+      cookie: adminCookie,
+      raw: form.raw,
+      contentType: form.contentType
+    });
+    assert.equal(res.status, 201, `创建应成功，实际 ${res.status} ${res.text?.slice(0, 120)}`);
+
+    const coverPath = String(res.json.cover_path).replace('https://fake.blob.invalid/', '');
+    const stored = blobs.get(coverPath);
+    assert.ok(stored, '封面对象应已写入');
+
+    // 采样左上角像素：透明区域铺白后应为白色，若未 flatten 会是黑色
+    const { data, info } = await sharp(stored.body).raw().toBuffer({ resolveWithObject: true });
+    const [r, g, b] = [data[0], data[1], data[2]];
+    assert.ok(r > 200 && g > 200 && b > 200,
+      `透明区域应铺白底，实际 RGB=${r},${g},${b}（${info.width}x${info.height}）`);
+  });
+
+  await test('竖拍照片（EXIF 旋转）的封面宽高不颠倒', async () => {
+    // 生成 80x40 横图并写入 EXIF Orientation=6（需顺时针旋转 90° 才正确）
+    const base = await sharp({
+      create: { width: 80, height: 40, channels: 3, background: { r: 200, g: 30, b: 30 } }
+    }).jpeg().withMetadata({ orientation: 6 }).toBuffer();
+
+    const form = multipart([{ name: 'cover', filename: 'rotated.jpg', contentType: 'image/jpeg', data: base }]);
+    const res = await request('POST', '/api/trips', {
+      cookie: adminCookie,
+      raw: form.raw,
+      contentType: form.contentType
+    });
+    assert.equal(res.status, 201);
+
+    const meta = res.json.cover_meta;
+    assert.ok(meta && Number.isFinite(meta.width) && Number.isFinite(meta.height), '应返回封面宽高');
+    assert.ok(meta.height > meta.width,
+      `旋转后应变为竖图（高 > 宽），实际 ${meta.width}x${meta.height}；若使用原图 metadata 会颠倒`);
+
+    // 交叉验证：直接解码存储的封面，确认尺寸一致
+    const coverPath = String(res.json.cover_path).replace('https://fake.blob.invalid/', '');
+    const storedMeta = await sharp(blobs.get(coverPath).body).metadata();
+    assert.equal(meta.width, storedMeta.width, '记录宽度应与实际封面一致');
+    assert.equal(meta.height, storedMeta.height, '记录高度应与实际封面一致');
+  });
+
+  process.stdout.write('\n上传校验\n');
+
+  await test('不支持的文件类型返回 400 而非 500', async () => {
+    const form = multipart([
+      { name: 'album', filename: 'evil.exe', contentType: 'application/octet-stream', data: Buffer.from('MZ') }
+    ]);
+    const res = await request('POST', '/api/trips', {
+      cookie: adminCookie,
+      raw: form.raw,
+      contentType: form.contentType
+    });
+    assert.equal(res.status, 400, `应返回 400，实际 ${res.status}`);
+    assert.ok(String(res.json?.error || '').includes('不支持的文件类型'), '应说明真实原因');
+  });
+
+  await test('非图片字段（除 attachments）拒绝错误 MIME', async () => {
+    const form = multipart([
+      { name: 'album', filename: 'note.pdf', contentType: 'application/pdf', data: Buffer.from('%PDF-1.4') }
+    ]);
+    const res = await request('POST', '/api/trips', {
+      cookie: adminCookie,
+      raw: form.raw,
+      contentType: form.contentType
+    });
+    assert.equal(res.status, 400);
+    assert.ok(String(res.json?.error || '').includes('仅支持图片格式'));
+  });
+
+  await test('attachments 字段允许非图片文件', async () => {
+    const form = multipart([
+      { name: 'attachments', filename: 'note.txt', contentType: 'text/plain', data: Buffer.from('hello') }
+    ]);
+    const res = await request('POST', '/api/trips', {
+      cookie: adminCookie,
+      raw: form.raw,
+      contentType: form.contentType
+    });
+    assert.equal(res.status, 201, `附件上传应成功，实际 ${res.status} ${res.text?.slice(0, 120)}`);
   });
 
   process.stdout.write('\n错误处理\n');

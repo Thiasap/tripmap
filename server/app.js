@@ -89,6 +89,10 @@ app.use(express.static(path.join(rootDir, 'public')));
 
 app.use((err, req, res, next) => {
   console.error(err);
+  // Multer 错误映射为明确的客户端错误，避免用户只看到 500
+  if (err.code === 'LIMIT_FILE_SIZE') return res.status(413).json({ error: '文件大小超出限制（最大 200MB）' });
+  if (err.code === 'LIMIT_FIELD_SIZE') return res.status(413).json({ error: '字段内容过长（最大 100KB）' });
+  if (err.name === 'MulterError') return res.status(400).json({ error: `上传失败: ${err.message}` });
   const status = err.status || err.statusCode || 500;
   const message = status === 500 ? '服务器内部错误' : (err.message || 'Server error');
   res.status(status).json({ error: message });
