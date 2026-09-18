@@ -9,6 +9,8 @@
  *
  * 用法：
  *   node tools/backup/export-blobs.mjs [--out=backups/xxx] [--concurrency=4]
+ * 存储源：默认 Vercel Blob；`TRIPMAP_STORAGE=s3`（或 `--source=r2`）时改为 Cloudflare R2，
+ * 两者输出同一格式（blobs/index.jsonl + manifest），校验工具无需区分。
  */
 
 import fs from 'node:fs';
@@ -16,6 +18,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { AwsClient } from 'aws4fetch';
 import {
   loadLocalSecrets,
   requireEnv,
@@ -30,6 +33,72 @@ import {
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const LIST_ENDPOINT = 'https://blob.vercel-storage.com/';
+
+const R2_MIME = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp',
+  '.gif': 'image/gif', '.pdf': 'application/pdf', '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime', '.txt': 'text/plain'
+};
+const r2MimeOf = (pathname) => R2_MIME[path.extname(pathname).toLowerCase()] || 'application/octet-stream';
+
+const decodeXml = (text) => String(text)
+  .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+  .replace(/&#39;/g, "'").replace(/&amp;/g, '&');
+
+/** 解析 ListObjectsV2 响应（与 server/adapters/s3/storage.js 同一套轻量正则，避免为 XML 引依赖） */
+function parseListXml(xml) {
+  const blobs = [];
+  for (const block of String(xml).match(/<Contents>[\s\S]*?<\/Contents>/g) || []) {
+    const key = /<Key>([\s\S]*?)<\/Key>/.exec(block);
+    if (!key) continue;
+    const size = /<Size>(\d+)<\/Size>/.exec(block);
+    const modified = /<LastModified>([\s\S]*?)<\/LastModified>/.exec(block);
+    blobs.push({
+      pathname: decodeXml(key[1]),
+      size: size ? Number(size[1]) : 0,
+      uploadedAt: modified ? modified[1] : null
+    });
+  }
+  const token = /<NextContinuationToken>([\s\S]*?)<\/NextContinuationToken>/.exec(xml);
+  const truncated = /<IsTruncated>true<\/IsTruncated>/.test(xml);
+  return { blobs, cursor: truncated && token ? decodeXml(token[1]) : null };
+}
+
+/**
+ * R2 源：ListObjectsV2 分页列出全部对象（只读，不写不删）。
+ * 下载走公开读域名（与站点同源），因此 url 字段直接可 GET。
+ */
+async function listAllR2Objects(secrets) {
+  const accountId = requireEnv('R2_ACCOUNT_ID', null, secrets);
+  const bucket = requireEnv('R2_BUCKET', null, secrets);
+  const accessKeyId = requireEnv('R2_ACCESS_KEY_ID', null, secrets);
+  const secretAccessKey = requireEnv('R2_SECRET_ACCESS_KEY', null, secrets);
+  const publicBase = requireEnv('R2_PUBLIC_BASE_URL', null, secrets).replace(/\/+$/, '');
+  const client = new AwsClient({ accessKeyId, secretAccessKey });
+  const endpoint = `https://${accountId}.r2.cloudflarestorage.com/${bucket}`;
+
+  const all = [];
+  let cursor = null;
+  let pages = 0;
+  do {
+    const params = new URLSearchParams({ 'list-type': '2', 'max-keys': '1000' });
+    if (cursor) params.set('continuation-token', cursor);
+    const res = await client.fetch(`${endpoint}?${params.toString()}`);
+    if (!res.ok) {
+      throw new Error(`R2 list 失败: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
+    }
+    const { blobs, cursor: next } = parseListXml(await res.text());
+    all.push(...blobs.map((b) => ({
+      ...b,
+      url: `${publicBase}/${b.pathname}`,
+      contentType: r2MimeOf(b.pathname)
+    })));
+    cursor = next;
+    pages += 1;
+    if (pages > 200) throw new Error('分页超过 200 页，疑似游标未推进，已中止');
+  } while (cursor);
+  return all;
+}
 
 function resolveOutputDir(args) {
   if (args.out) return path.resolve(process.cwd(), args.out);
@@ -164,15 +233,22 @@ async function main() {
   const objectsDir = path.join(blobsDir, 'objects');
 
   const secrets = loadLocalSecrets(projectRoot);
-  const token = requireEnv('BLOB_READ_WRITE_TOKEN', null, secrets);
-  log(`Blob Token: ${describeSecret(token)}（只读使用：list + GET）`);
+  const source = String(args.source || process.env.TRIPMAP_STORAGE || 'blob').toLowerCase() === 's3' ? 'r2' : 'blob';
+  let blobs;
+  if (source === 'r2') {
+    log('存储源: Cloudflare R2（只读 list + 公开 GET，不写不删）');
+    blobs = await listAllR2Objects(secrets);
+  } else {
+    const token = requireEnv('BLOB_READ_WRITE_TOKEN', null, secrets);
+    log(`Blob Token: ${describeSecret(token)}（只读使用：list + GET）`);
+    blobs = await listAllBlobs(token);
+  }
   log(`输出目录: ${outDir}`);
   log(`并发: ${concurrency}`);
 
   const started = Date.now();
-  const blobs = await listAllBlobs(token);
   const totalBytes = blobs.reduce((sum, b) => sum + (b.size || 0), 0);
-  log(`Blob 对象: ${blobs.length} 个，共 ${formatBytes(totalBytes)}`);
+  log(`对象: ${blobs.length} 个，共 ${formatBytes(totalBytes)}（存储源: ${source}）`);
 
   await fsp.mkdir(objectsDir, { recursive: true });
 
@@ -213,7 +289,7 @@ async function main() {
     backupId: manifest.backupId || path.basename(outDir),
     createdAt: manifest.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    source: manifest.source || {},
+    source: { ...(manifest.source || {}), storage: source },
     database: manifest.database || null,
     blobs: {
       indexPath: 'blobs/index.jsonl',
