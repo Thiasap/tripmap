@@ -19,7 +19,6 @@ const state = {
   role: 'guest',
   mapYRatio: 1,
   geojson: null,
-  layout: 'desktop',
   dragging: false,
   pendingRelayout: false,
   fittedWidth: 0
@@ -68,8 +67,6 @@ const cityOptions = document.querySelector('#cityOptions');
 const mapWrap = document.querySelector('#mapWrap');
 const mapHint = document.querySelector('.map-hint');
 const defaultMapHint = mapHint.textContent;
-// 提示文案随布局切换：移动端没有滚轮，卡片也不在地图上
-const COMPACT_MAP_HINT = '双指缩放，拖动地图平移；卡片在下方列表。';
 
 let quill;
 let lightbox;
@@ -245,18 +242,13 @@ async function loadTrips() {
   if (state.geojson && mapWrap.clientWidth !== state.fittedWidth) relayout();
 }
 
-// 地图留白：桌面维持原有 120px 视觉留白不变；窄屏改为小留白，
-// 否则 390px 屏上拟合区只剩 150px 宽，地图被压成一小块、与卡片比例脱钩
-function mapPaddingX(width) {
-  return isCompactWidth(width) ? 16 : 120;
-}
-
-// 投影拟合的唯一入口，initMap 与 relayout 共用同一套规则，避免两处漂移
+// 投影拟合的唯一入口，initMap 与 relayout 共用同一套规则，避免两处漂移。
+// 留白固定 120px，与历史版本逐像素一致——移动端不做单独布局（见 index.html 的 viewport），
+// 保证「卡片和地图的位置永远不变」
 function fitProjection(width, height) {
-  const padX = mapPaddingX(width);
   state.fittedWidth = width;
   state.projection = d3.geoIdentity().reflectY(true)
-    .fitExtent([[padX, 12], [width - padX, height - 12]], state.geojson);
+    .fitExtent([[120, 12], [width - 120, height - 12]], state.geojson);
   state.path = d3.geoPath(state.projection);
 }
 
@@ -285,43 +277,19 @@ function relayout() {
   renderLinks();
 }
 
-const COMPACT_MAX_WIDTH = 768;
-
-function isCompactWidth(width) {
-  return width < COMPACT_MAX_WIDTH;
-}
-
-function mapHintText() {
-  return state.layout === 'compact' ? COMPACT_MAP_HINT : defaultMapHint;
-}
-
-// 布局模式切换：compact 时把卡片层移出地图容器走文档流列表，desktop 时移回地图内做绝对定位
-function applyLayout() {
-  const compact = isCompactWidth(document.documentElement.clientWidth);
-  state.layout = compact ? 'compact' : 'desktop';
-  document.body.classList.toggle('layout-compact', compact);
-  mapHint.textContent = mapHintText();
-  const workspace = document.querySelector('.workspace');
-  if (compact) {
-    if (cardsLayer.parentElement !== workspace) workspace.appendChild(cardsLayer);
-  } else if (cardsLayer.parentElement !== mapWrap) {
-    mapWrap.appendChild(cardsLayer);
-  }
-}
-
 function scheduleRelayout(delay = 150) {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
     // 手势进行中不打断交互，结束后补一次
     if (state.dragging || state.pickingCoordinate) { state.pendingRelayout = true; return; }
-    requestAnimationFrame(() => { applyLayout(); relayout(); });
+    requestAnimationFrame(relayout);
   }, delay);
 }
 
 function flushPendingRelayout() {
   if (!state.pendingRelayout) return;
   state.pendingRelayout = false;
-  requestAnimationFrame(() => { applyLayout(); relayout(); });
+  requestAnimationFrame(relayout);
 }
 
 async function initMap() {
@@ -538,7 +506,7 @@ function cancelCoordinatePick(restoreDialog = false) {
   if (!state.pickingCoordinate) return;
   state.pickingCoordinate = false;
   mapWrap.classList.remove('picking-coordinate');
-  mapHint.textContent = mapHintText();
+  mapHint.textContent = defaultMapHint;
   if (restoreDialog) showTripDialog();
   flushPendingRelayout();
 }
@@ -553,14 +521,6 @@ function cardPosToPixel(trip) {
 }
 
 function updateCards() {
-  // compact 布局下卡片走文档流，清空内联定位样式，交由 CSS 接管
-  if (state.layout === 'compact') {
-    state.trips.forEach((trip) => {
-      const card = cardsLayer.querySelector(`[data-id="${trip.id}"]`);
-      if (card && card.getAttribute('style')) card.removeAttribute('style');
-    });
-    return;
-  }
   // 视口缩放因子：卡片随窗口大小等比缩放（1920px 基准，钳制 0.4-2.5）
   const viewScale = Math.max(0.4, Math.min(mapWrap.clientWidth / 1920, 2.5));
   state.trips.forEach((trip) => {
@@ -610,11 +570,6 @@ function renderTrips() {
 }
 
 function renderLinks() {
-  // compact 布局下卡片已脱离地图坐标系，连线无意义
-  if (state.layout === 'compact') {
-    linkSvg.selectAll('line').remove();
-    return;
-  }
   const lines = state.trips.map((trip) => {
     const point = projectedPoint(trip);
     const card = cardsLayer.querySelector(`[data-id="${trip.id}"]`);
@@ -659,8 +614,6 @@ function makeCardDraggable(card, trip) {
   let moved = false;
 
   card.addEventListener('pointerdown', (event) => {
-    // compact 布局下卡片在文档流中，禁用拖拽以保证列表可滚动
-    if (state.layout === 'compact') return;
     event.preventDefault();
     state.dragging = true;
     startX = event.clientX;
@@ -1236,10 +1189,10 @@ let resizeTimer = null;
 let lastViewportWidth = document.documentElement.clientWidth;
 window.addEventListener('resize', () => {
   const width = document.documentElement.clientWidth;
-  const crossedBreakpoint = isCompactWidth(width) !== isCompactWidth(lastViewportWidth);
   const widthChanged = Math.abs(width - lastViewportWidth) > 1;
   lastViewportWidth = width;
-  if (!widthChanged && !crossedBreakpoint) return;
+  // 只对宽度变化重排：手机软键盘、地址栏收起只改高度，忽略以免输入时布局跳动
+  if (!widthChanged) return;
   scheduleRelayout();
 });
 
@@ -1331,7 +1284,6 @@ exportDoBtn.addEventListener('click', async () => {
 });
 
 initEditor();
-applyLayout();
 Promise.all([checkAuth(), loadSettings(), loadRegions(), loadParticipants()]).then(initMap).catch((error) => {
   console.error(error);
   alert('地图加载失败，请检查 china_provinces.geojson。');
