@@ -5,8 +5,9 @@
  *   node tools/migrate/blob-to-r2.mjs --dry-run        # 只列源对象 + 生成映射，不写任何东西
  *   node tools/migrate/blob-to-r2.mjs --apply          # 复制（幂等：目标已存在且大小一致则跳过）
  *   node tools/migrate/blob-to-r2.mjs --verify         # 校验：对象数 / 大小 / 抽样 SHA-256
- *   node tools/migrate/blob-to-r2.mjs --rewrite-db     # 打印将改写的 DB 行（dry-run）
- *   node tools/migrate/blob-to-r2.mjs --rewrite-db --confirm   # 真正改写 DB 里的 URL 前缀
+ *   node tools/migrate/blob-to-r2.mjs --rewrite-db     # 打印将 key 化的 DB 行（dry-run）
+ *   node tools/migrate/blob-to-r2.mjs --rewrite-db --confirm   # 封面改写为相对 key、富文本改写为 R2 URL，并落回滚映射
+ *   node tools/migrate/blob-to-r2.mjs --rollback-db [--confirm]  # 按回滚映射还原为 Blob 绝对 URL（配合 TRIPMAP_STORAGE=blob）
  *
  * 产物（都落在 .agent/，已被 Git 忽略）：
  *   r2-migration-map.json     旧 URL → 新 URL 的完整映射（回滚用）
@@ -25,6 +26,7 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const AGENT_DIR = path.join(projectRoot, '.agent');
 const MAP_PATH = path.join(AGENT_DIR, 'r2-migration-map.json');
 const REPORT_PATH = path.join(AGENT_DIR, 'r2-migration-report.json');
+const BACKMAP_PATH = path.join(AGENT_DIR, 'r2-keyify-backmap.json');
 
 // ---------- 环境与适配层 ----------
 function loadSecrets() {
@@ -179,12 +181,66 @@ async function verify() {
 
 async function rewriteDb(confirm) {
   const { neon } = require('@neondatabase/serverless');
-  const base = fs.existsSync(MAP_PATH) ? JSON.parse(fs.readFileSync(MAP_PATH, 'utf8')).base : target.publicBase;
   const mapData = fs.existsSync(MAP_PATH) ? JSON.parse(fs.readFileSync(MAP_PATH, 'utf8')).objects : [];
-  const urlMap = new Map(mapData.map((item) => [item.oldUrl, item.newUrl]));
+  // 封面 key 化：DB 存相对 key，URL 由服务端按当前 TRIPMAP_STORAGE 现场解析（换域名只需改环境变量）
+  // 富文本保持绝对 URL：HTML 内嵌地址无法由 key 还原，改写为 R2 绝对 URL
+  const oldToKey = new Map(mapData.map((item) => [item.oldUrl, item.pathname]));
+  const oldToNew = new Map(mapData.map((item) => [item.oldUrl, item.newUrl]));
 
   const sql = neon(process.env.DATABASE_URL);
   const trips = await sql`SELECT id, cover_path, rich_text_path FROM trips`;
+
+  let coverHits = 0;
+  let richTextHits = 0;
+  const updates = [];
+  const backmap = [];
+  for (const trip of trips) {
+    const cover = String(trip.cover_path || '');
+    const html = String(trip.rich_text_path || '');
+    let nextCover = cover;
+    if (oldToKey.has(cover)) { nextCover = oldToKey.get(cover); coverHits += 1; }
+
+    let nextHtml = html;
+    if (html) {
+      for (const [oldUrl, newUrl] of oldToNew) {
+        if (nextHtml.includes(oldUrl)) { nextHtml = nextHtml.split(oldUrl).join(newUrl); richTextHits += 1; }
+      }
+    }
+    if (nextCover !== cover || nextHtml !== html) {
+      updates.push({ id: trip.id, cover: nextCover, html: nextHtml });
+      backmap.push({ id: trip.id, key: nextCover, blobUrl: cover });
+    }
+  }
+
+  console.log('将改写：封面 key 化 ' + coverHits + ' 条、富文本 URL 改写 ' + richTextHits + ' 处；涉及行数 ' + updates.length);
+  if (!confirm) {
+    console.log('（dry-run：未写入数据库。加 --confirm 才会执行）');
+    writeReport({ action: 'keyify-db-dry-run', coverHits, richTextHits, rows: updates.length });
+    return;
+  }
+
+  // 先落回滚映射再改库：任何时刻都能按映射还原
+  fs.writeFileSync(BACKMAP_PATH, JSON.stringify({ createdAt: new Date().toISOString(), rows: backmap }, null, 2));
+  let done = 0;
+  for (const row of updates) {
+    await sql`UPDATE trips SET cover_path = ${row.cover}, rich_text_path = ${row.html} WHERE id = ${row.id}`;
+    done += 1;
+  }
+  console.log('已改写 ' + done + ' 行（DB 现存相对 key；回滚映射：' + BACKMAP_PATH + '）');
+  writeReport({ action: 'keyify-db-apply', coverHits, richTextHits, rows: done });
+}
+
+/** 回滚：把 key 化的封面还原为 Blob 绝对 URL，富文本改回旧 URL（配合 TRIPMAP_STORAGE=blob 即回到切换前） */
+async function rollbackDb(confirm) {
+  const { neon } = require('@neondatabase/serverless');
+  if (!fs.existsSync(BACKMAP_PATH)) throw new Error('缺少回滚映射 ' + BACKMAP_PATH + '（由 --rewrite-db --confirm 生成）');
+  const backmap = JSON.parse(fs.readFileSync(BACKMAP_PATH, 'utf8')).rows;
+  const mapData = fs.existsSync(MAP_PATH) ? JSON.parse(fs.readFileSync(MAP_PATH, 'utf8')).objects : [];
+  const newToOld = new Map(mapData.map((item) => [item.newUrl, item.oldUrl]));
+
+  const sql = neon(process.env.DATABASE_URL);
+  const trips = await sql`SELECT id, cover_path, rich_text_path FROM trips`;
+  const byId = new Map(backmap.map((row) => [row.id, row]));
 
   let coverHits = 0;
   let richTextHits = 0;
@@ -193,34 +249,31 @@ async function rewriteDb(confirm) {
     const cover = String(trip.cover_path || '');
     const html = String(trip.rich_text_path || '');
     let nextCover = cover;
-    if (urlMap.has(cover)) { nextCover = urlMap.get(cover); coverHits += 1; }
+    const entry = byId.get(trip.id);
+    if (entry && entry.blobUrl && cover === entry.key) { nextCover = entry.blobUrl; coverHits += 1; }
 
     let nextHtml = html;
     if (html) {
-      for (const [oldUrl, newUrl] of urlMap) {
-        if (nextHtml.includes(oldUrl)) { nextHtml = nextHtml.split(oldUrl).join(newUrl); richTextHits += 1; }
+      for (const [newUrl, oldUrl] of newToOld) {
+        if (nextHtml.includes(newUrl)) { nextHtml = nextHtml.split(newUrl).join(oldUrl); richTextHits += 1; }
       }
     }
-    if (nextCover !== cover || nextHtml !== html) {
-      updates.push({ id: trip.id, cover: nextCover, html: nextHtml });
-    }
+    if (nextCover !== cover || nextHtml !== html) updates.push({ id: trip.id, cover: nextCover, html: nextHtml });
   }
 
-  console.log('将改写：封面 ' + coverHits + ' 条、富文本含旧 URL ' + richTextHits + ' 处；涉及行数 ' + updates.length);
-  console.log('新前缀 = ' + base);
+  console.log('回滚将改写：封面 ' + coverHits + ' 条、富文本 ' + richTextHits + ' 处；涉及行数 ' + updates.length);
   if (!confirm) {
     console.log('（dry-run：未写入数据库。加 --confirm 才会执行）');
-    writeReport({ action: 'rewrite-db-dry-run', coverHits, richTextHits, rows: updates.length, base });
+    writeReport({ action: 'rollback-db-dry-run', coverHits, richTextHits, rows: updates.length });
     return;
   }
-
   let done = 0;
   for (const row of updates) {
     await sql`UPDATE trips SET cover_path = ${row.cover}, rich_text_path = ${row.html} WHERE id = ${row.id}`;
     done += 1;
   }
-  console.log('已改写 ' + done + ' 行');
-  writeReport({ action: 'rewrite-db-apply', coverHits, richTextHits, rows: done, base });
+  console.log('已回滚 ' + done + ' 行（DB 恢复 Blob 绝对 URL；配合 TRIPMAP_STORAGE=blob 即回到切换前状态）');
+  writeReport({ action: 'rollback-db-apply', coverHits, richTextHits, rows: done });
 }
 
 // ---------- 入口 ----------
@@ -230,7 +283,8 @@ async function rewriteDb(confirm) {
   if (has('--apply')) return apply();
   if (has('--verify')) return verify();
   if (has('--rewrite-db')) return rewriteDb(has('--confirm'));
-  console.log('请指定动作：--dry-run | --apply | --verify | --rewrite-db [--confirm]');
+  if (has('--rollback-db')) return rollbackDb(has('--confirm'));
+  console.log('请指定动作：--dry-run | --apply | --verify | --rewrite-db [--confirm] | --rollback-db [--confirm]');
 })().catch((error) => {
   console.log('失败：' + String(error && error.message).slice(0, 300));
   process.exit(1);

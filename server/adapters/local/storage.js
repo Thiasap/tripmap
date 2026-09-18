@@ -72,6 +72,11 @@ function createLocalStorage() {
       return { url: `/media/${pathname}`, pathname };
     },
 
+    /** 由相对 key 还原 URL（本地模式由 server/app.js 的 /media 静态托管） */
+    publicUrl(key) {
+      return `/media/${String(key).replace(/^\/+/, '')}`;
+    },
+
     async list({ prefix = '', limit = 1000, cursor } = {}) {
       const all = walk(mediaRoot, mediaRoot).filter((name) => name.startsWith(prefix)).sort();
       const offset = Math.max(0, Number(cursor) || 0);

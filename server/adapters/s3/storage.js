@@ -102,6 +102,11 @@ function createS3Storage() {
       return { url: `${publicBase}/${key}`, pathname: key };
     },
 
+    /** 由相对 key 还原公开 URL（DB 只存 key，换域名只需改 R2_PUBLIC_BASE_URL） */
+    publicUrl(key) {
+      return `${publicBase}/${assertKey(key)}`;
+    },
+
     async list({ prefix = '', limit = 1000, cursor } = {}) {
       const params = new URLSearchParams({
         'list-type': '2',

@@ -3,7 +3,10 @@ const path = require('path');
 const multer = require('multer');
 const sharp = require('sharp');
 const sanitizeHtml = require('sanitize-html');
-const { put, del, list, read } = require('./adapters/storage').storage();
+const storageModule = require('./adapters/storage');
+const { put, del, list, read } = storageModule.storage();
+// mediaUrl / coverRef 是模块级工具（内部按当前适配器分派），不在适配器实例上
+const { mediaUrl, coverRef } = storageModule;
 const jwt = require('jsonwebtoken');
 const { sql } = require('./db');
 const { JWT_SECRET } = require('./auth');
@@ -110,7 +113,8 @@ function normalizeTrip(row) {
     // 历史脏数据不应导致整条记录读取失败
     coverMeta = null;
   }
-  return { ...row, cover_meta: coverMeta };
+  // DB 存相对 key（与存储解耦），返回给浏览器时才解析为完整 URL
+  return { ...row, cover_path: mediaUrl(row.cover_path), cover_meta: coverMeta };
 }
 
 /** 参与次数：只接受 >= 0 的整数，非法值返回 null 由调用方拒绝 */
@@ -145,7 +149,8 @@ async function saveUploads(id, files = {}) {
       access: 'public',
       contentType: 'image/jpeg'
     });
-    coverPath = blob.url;
+    // 存相对 key（s3/fs）或绝对 URL（Blob 无法由 key 重建），由 coverRef 按适配器能力决定
+    coverPath = coverRef(blob);
     coverMeta = { width: outputMeta.width || 4, height: outputMeta.height || 3 };
   }
 
@@ -338,9 +343,13 @@ async function cleanupMediaFiles() {
   }
 
   // 被引用的 URL：封面 + 富文本正文中出现的媒体地址
+  // 封面同时收两种形态（相对 key 与完整 URL），兼容迁移过渡期的混合数据
   const keep = new Set();
   for (const trip of trips) {
-    if (trip.cover_path) keep.add(String(trip.cover_path));
+    if (trip.cover_path) {
+      keep.add(String(trip.cover_path));
+      keep.add(mediaUrl(trip.cover_path));
+    }
     const html = String(trip.rich_text_path || '');
     if (!html) continue;
     for (const match of html.matchAll(/https?:\/\/[^"'\s<>)]+/g)) keep.add(match[0]);

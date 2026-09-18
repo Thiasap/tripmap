@@ -6,6 +6,7 @@
  *   list({ prefix, limit, cursor })           → { blobs: [{ pathname, url, size, uploadedAt, contentType }], cursor }
  *   del(refs)                                 → refs 为 url 或 url[]，删除对象
  *   read(ref)                                 → { body: Buffer, contentType }；ref 为对象 { url } 或 url 字符串
+ *   publicUrl(key)                            → 由相对 key 还原公开 URL（可选能力，见 mediaUrl）
  *
  * 实现（由 `TRIPMAP_STORAGE` 选择）：
  *   blob（默认）→ Vercel Blob
@@ -77,4 +78,35 @@ function storage() {
   return shared;
 }
 
-module.exports = { createStorage, storage };
+/**
+ * 把 DB 中的媒体引用解析为浏览器可用的 URL。
+ *
+ * DB 约定存「相对 key」（如 album/<tripId>/cover_<tripId>.jpg），与具体存储解耦：
+ * 换域名 / 换存储只需改环境变量，无需改写数据库。
+ * 兼容历史数据：绝对 URL（http(s)://、//）与本地根相对路径（/media/...）原样返回。
+ * 注意：Blob 的公开 URL 带有不属于 key 的随机后缀，无法由 key 重建，故 blob 实现
+ * 不提供 publicUrl——该模式下 DB 必须存绝对 URL；如需回滚到 Blob，用迁移脚本按
+ * 映射表回写（tools/migrate/blob-to-r2.mjs --rollback-db）。
+ */
+function mediaUrl(ref) {
+  if (ref == null) return ref;
+  const value = String(ref);
+  if (!value) return value;
+  if (/^(https?:)?\/\//i.test(value) || value.startsWith('/')) return value;
+  const adapter = storage();
+  if (typeof adapter.publicUrl !== 'function') return value;
+  return adapter.publicUrl(value);
+}
+
+/**
+ * 决定写入 DB 的封面引用形态：
+ *   支持 publicUrl 的实现（s3 / fs）→ 存相对 key，与域名/存储解耦；
+ *   Blob → 只能存绝对 URL（其公开 URL 带不属于 key 的随机后缀，无法由 key 重建）。
+ * 读取侧 mediaUrl 两种形态都兼容，因此历史数据无需迁移即可继续工作。
+ */
+function coverRef(putResult) {
+  const adapter = storage();
+  return typeof adapter.publicUrl === 'function' ? putResult.pathname : putResult.url;
+}
+
+module.exports = { createStorage, storage, mediaUrl, coverRef };

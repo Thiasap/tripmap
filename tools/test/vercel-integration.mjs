@@ -159,7 +159,7 @@ sqlStub.transaction = async (queries) => {
 
 // 内存 Blob 桩
 // del 严格模拟真实 API：只接受完整 URL（http 开头），传 pathname 必须报错。
-// 这样一旦有人回退成传 pathname，测试会立刻失败。
+// put 返回 { url, pathname }，与真实 @vercel/blob 同形——业务层 key 化改造依赖 pathname。
 const blobs = new Map();
 const blobStub = {
   put: async (pathname, body, options) => {
@@ -170,7 +170,7 @@ const blobStub = {
       contentType: options?.contentType,
       uploadedAt: new Date().toISOString()
     });
-    return { url: `https://fake.blob.invalid/${pathname}` };
+    return { url: `https://fake.blob.invalid/${pathname}`, pathname };
   },
   del: async (target) => {
     const targets = Array.isArray(target) ? target : [target];
