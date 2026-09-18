@@ -249,6 +249,8 @@ node server/app.js
 - 服务端口固定 3002，默认仅监听本机回环地址（局域网无法访问）
 - 本地单用户使用
 - 媒体文件删除/清理均移至 `media_recycle/` 时间戳目录，不直接物理删除
+- 云端媒体存储于 Cloudflare R2（自定义域名直读），数据库只存**相对 key**（如 `album/<tripId>/cover_x.jpg`），URL 由服务端按 `TRIPMAP_STORAGE` 现场解析——换域名/换存储只需改环境变量，无需改库
+- 2026-09-18 完成 Vercel Blob → R2 迁移并切生产：先复制校验（645 对象）再切换，回滚映射留档，Blob 对象未删可随时回退
 - 新建旅行时富文本图片先存于 `richtext_images/draft/`，保存时自动迁移到旅行目录并改写 URL
 - 省市数据来源 [regions-data](https://github.com/slightlee/regions-data)
 - 使用 pnpm 管理依赖，`pnpm install` 安装
