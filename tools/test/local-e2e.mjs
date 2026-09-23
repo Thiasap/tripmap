@@ -3,7 +3,7 @@
  *
  * 做法：以子进程启动 server/app.js（TRIPMAP_BACKEND=local），走真实 HTTP 完成
  * 「登录 → 草稿图上传统 → 建旅行（封面+相册+草稿插图迁移）→ 追加照片 → 删除进回收站
- *   → 清理清空回收站 → 删除旅行回收全部媒体」全链路。
+ *   → 清理清空回收站 → 删除旅行仅删行 → 再次清理回收孤儿媒体」全链路。
  *
  * 该套件是 local 实现的主要回归网；cloud 侧由部署前 Preview 冒烟覆盖（见 MERGE_PLAN §6.2）。
  */
@@ -142,12 +142,29 @@ const form = (parts) => {
 
   res = await req('/api/trips/' + id, { method: 'DELETE' });
   const tripRemoved = await res.json();
-  rec(res.status === 200 && tripRemoved.moved_count >= 1, '删除旅行 → 回收全部媒体', 'moved=' + tripRemoved.moved_count);
+  rec(res.status === 200 && tripRemoved.deleted === true, '删除旅行 → 仅删 DB 行立即返回', 'deleted=' + tripRemoved.deleted);
 
   res = await req('/api/trips');
   const remaining = await res.json();
   rec(!arr(remaining).some((t) => t.id === id), '数据库中该旅行已删除', '剩余 trips=' + arr(remaining).length);
   void recycleLeft;
+
+  // 本地适配器以 mtime 作 uploadedAt：把孤儿目录回拨到宽限期（1h）外，验证过期孤儿会被回收
+  const past = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const backdate = (dir) => {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) backdate(p);
+      else fs.utimesSync(p, past, past);
+    }
+  };
+  backdate(path.join(tmpRoot, 'media', 'album', id));
+  backdate(path.join(tmpRoot, 'media', 'richtext_images', id));
+
+  res = await req('/api/cleanup-media', { method: 'POST' });
+  const orphanSwept = await res.json();
+  rec(res.status === 200 && orphanSwept.moved_count >= 1, '再次清理 → 宽限期外的孤儿媒体被回收', 'moved=' + orphanSwept.moved_count);
 
   cleanup();
   console.log('\n' + pass + ' 通过，' + fail + ' 失败');

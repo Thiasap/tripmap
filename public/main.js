@@ -899,7 +899,7 @@ async function submitForm(event) {
 
 async function deleteSelected() {
   if (!state.selected) return;
-  if (!confirm(`删除“${state.selected.name}”？对应媒体文件会被移入回收目录，不直接删除。`)) return;
+  if (!confirm(`删除“${state.selected.name}”？卡片立即删除，媒体文件将在下次清理时自动回收。`)) return;
   const res = await fetch(`/api/trips/${state.selected.id}`, { method: 'DELETE' });
   if (!res.ok) throw new Error(await res.text());
   hideTripDialog();

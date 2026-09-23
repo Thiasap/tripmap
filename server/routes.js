@@ -288,6 +288,9 @@ async function listAllByPrefix(prefix) {
 /** 未保存的富文本草稿图保留时长：避免清理掉用户正在编辑的内容 */
 const DRAFT_GRACE_MS = 24 * 60 * 60 * 1000;
 
+/** 孤儿目录宽限期：新建旅行是「先传图后插行」，窗口期内目录尚无 DB 行，不可回收 */
+const ORPHAN_GRACE_MS = 60 * 60 * 1000;
+
 /**
  * 清空回收站：彻底删除 recycle/ 下的全部对象。
  *
@@ -318,7 +321,8 @@ async function purgeRecycle() {
 
 /**
  * 清理媒体。判定规则：
- * 1. 所属旅行已不存在的目录（draft 除外）→ 回收
+ * 1. 所属旅行已不存在的目录（draft 除外）→ 回收；最近上传的孤儿在宽限期内跳过
+ *    （新建旅行「先传图后插行」存在无行窗口，删除旅行也改为只删行、媒体延迟回收）
  * 2. richtext_images/draft 中超过 24 小时宽限期的对象 → 回收
  * 3. 富文本正文未引用的 richtext_images 对象 → 回收
  * 4. 原图已不存在的缩略图（thumb_ 前缀）→ 回收
@@ -363,8 +367,10 @@ async function cleanupMediaFiles() {
     if (!tripId || !name) continue;
 
     const isDraft = root === 'richtext_images' && tripId === 'draft';
-    const orphanTripDir = !tripIds.has(tripId) && !isDraft;
     const uploadedAt = blob.uploadedAt ? new Date(blob.uploadedAt).getTime() : 0;
+    // 宽限期内（最近上传）的孤儿跳过：旅行可能在「已传图、未插行」的创建窗口中
+    const orphanTripDir = !tripIds.has(tripId) && !isDraft &&
+      !(uploadedAt > 0 && now - uploadedAt < ORPHAN_GRACE_MS);
     const draftExpired = isDraft && uploadedAt > 0 && now - uploadedAt > DRAFT_GRACE_MS;
     const unusedRichText = root === 'richtext_images' && !isDraft && !keep.has(blob.url);
     // 缩略图命名规则为 thumb_<原文件名>.jpg
@@ -587,13 +593,12 @@ router.delete('/trips/:id/files', requireAdmin, async (req, res, next) => {
 
 router.delete('/trips/:id', requireAdmin, async (req, res, next) => {
   try {
+    // 只删 DB 行，媒体留在原地成为孤儿目录，由清理任务的 orphanTripDir 分支统一回收。
+    // 避免删除请求被逐对象 R2 往返（copy+delete）拖到 10s+；孤儿有宽限期保护。
     const rows = await sql`SELECT id FROM trips WHERE id = ${req.params.id}`;
     if (!rows.length) return res.status(404).json({ error: 'Trip not found' });
-    // 先回收媒体，再删除数据库记录：回收失败时保留记录，避免出现无法追踪的孤儿文件
-    const blobs = await blobsForTrip(req.params.id);
-    const result = await recycleBlobs(blobs);
     await sql`DELETE FROM trips WHERE id = ${req.params.id}`;
-    res.json({ recycle_path: result.recyclePath, moved_count: result.moved.length, failed_count: result.failed });
+    res.json({ deleted: true, id: req.params.id });
   } catch (e) { next(e); }
 });
 

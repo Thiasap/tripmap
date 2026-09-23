@@ -485,7 +485,7 @@ async function main() {
     assert.equal(recycled.length, 2, '回收目录中应有 2 个可恢复对象');
   });
 
-  await test('删除旅行时回收其全部媒体后再删记录', async () => {
+  await test('删除旅行仅删记录，媒体延迟由清理任务回收', async () => {
     const createRes = await request('POST', '/api/trips', {
       cookie: adminCookie,
       body: { name: '待删除旅行', province: '某省', city: '某市' }
@@ -496,13 +496,11 @@ async function main() {
 
     const res = await request('DELETE', `/api/trips/${doomedId}`, { cookie: adminCookie });
     assert.equal(res.status, 200);
-    assert.equal(res.json.moved_count, 2);
+    assert.equal(res.json.deleted, true, '应返回立即删除成功');
     const list = await request('GET', '/api/trips');
     assert.equal(list.json.some((t) => t.id === doomedId), false, '旅行记录应已删除');
-    const recycledAlbum = [...blobs.keys()].filter((k) => k === `${res.json.recycle_path}/album/${doomedId}/a.jpg`);
-    const recycledAttachment = [...blobs.keys()].filter((k) => k === `${res.json.recycle_path}/attachments/${doomedId}/b.pdf`);
-    assert.equal(recycledAlbum.length, 1, '相册图应可在回收目录中找回');
-    assert.equal(recycledAttachment.length, 1, '附件应可在回收目录中找回');
+    assert.equal(blobs.has(`album/${doomedId}/a.jpg`), true, '媒体应留在原地成为孤儿（由清理任务回收）');
+    assert.equal(blobs.has(`attachments/${doomedId}/b.pdf`), true, '附件应留在原地成为孤儿（由清理任务回收）');
   });
 
   await test('清理接口返回与前端约定的字段', async () => {
