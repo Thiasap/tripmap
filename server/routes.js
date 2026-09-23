@@ -154,10 +154,12 @@ async function saveUploads(id, files = {}) {
     coverMeta = { width: outputMeta.width || 4, height: outputMeta.height || 3 };
   }
 
-  for (const file of files.album || []) {
+  // 每张图的「原图 + 缩略图」互不依赖，并行上传：云端存储逐次往返延迟高，串行会把上传拖成 N×RTT
+  await Promise.all((files.album || []).map(async (file) => {
     const ext = path.extname(file.originalname) || '.jpg';
     const name = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
-    const blob = await put(`album/${id}/${safeName(name)}`, file.buffer, {
+    const key = safeName(name);
+    await put(`album/${id}/${key}`, file.buffer, {
       access: 'public',
       contentType: file.mimetype
     });
@@ -166,26 +168,19 @@ async function saveUploads(id, files = {}) {
         resize: { width: 320, height: 220, fit: 'inside', withoutEnlargement: true },
         quality: 72
       });
-      await put(`album/${id}/thumb_${safeName(name)}.jpg`, thumb, {
+      await put(`album/${id}/thumb_${key}.jpg`, thumb, {
         access: 'public',
         contentType: 'image/jpeg'
       });
     } catch { /* thumbnail generation best-effort */ }
-  }
+  }));
 
-  for (const file of files.attachments || []) {
-    const blob = await put(`attachments/${id}/${Date.now()}_${safeName(file.originalname)}`, file.buffer, {
-      access: 'public',
-      contentType: file.mimetype
-    });
-  }
-
-  for (const file of files.richtextImages || []) {
-    const blob = await put(`richtext_images/${id}/${Date.now()}_${safeName(file.originalname)}`, file.buffer, {
-      access: 'public',
-      contentType: file.mimetype
-    });
-  }
+  const putPlain = (prefix, file) => put(`${prefix}/${id}/${Date.now()}_${safeName(file.originalname)}`, file.buffer, {
+    access: 'public',
+    contentType: file.mimetype
+  });
+  await Promise.all((files.attachments || []).map((file) => putPlain('attachments', file)));
+  await Promise.all((files.richtextImages || []).map((file) => putPlain('richtext_images', file)));
 
   return { cover_path: coverPath, cover_meta: coverMeta };
 }
@@ -193,17 +188,18 @@ async function saveUploads(id, files = {}) {
 async function fileList(prefix) {
   try {
     const { blobs } = await list({ prefix, limit: 1000 });
+    // 单次 list 已返回全部对象（含 thumb_），缩略图在内存中匹配。
+    // 禁止回到逐图再 list 的写法：云端每次往返 ~1s，N+1 会把接口拖到 10s+。
+    const thumbOf = new Map();
+    for (const blob of blobs) {
+      const name = blob.pathname.split('/').pop();
+      if (name.startsWith('thumb_')) thumbOf.set(name.slice(6).replace(/\.jpg$/, ''), blob.url);
+    }
     const result = [];
     for (const blob of blobs) {
       const name = blob.pathname.split('/').pop();
       if (name.startsWith('thumb_') || name.startsWith('cover_')) continue;
-      const entry = { name, url: blob.url, thumb: blob.url };
-      const thumbPath = blob.pathname.replace(new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`), `thumb_${name}.jpg`);
-      try {
-        const { blobs: thumbs } = await list({ prefix: thumbPath, limit: 1 });
-        if (thumbs.length) entry.thumb = thumbs[0].url;
-      } catch { /* 无缩略图时回退到原图，前端直接使用 thumb 字段 */ }
-      result.push(entry);
+      result.push({ name, url: blob.url, thumb: thumbOf.get(name) || blob.url });
     }
     return result;
   } catch {
