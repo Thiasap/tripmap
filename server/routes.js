@@ -352,7 +352,8 @@ async function cleanupMediaFiles() {
     }
     const html = String(trip.rich_text_path || '');
     if (!html) continue;
-    for (const match of html.matchAll(/https?:\/\/[^"'\s<>)]+/g)) keep.add(match[0]);
+    // 同时收集绝对 URL 与本地模式相对路径（/media/...），否则本地清理会误删使用中的富文本图
+    for (const match of html.matchAll(/(https?:\/\/|\/media\/)[^"'\s<>)]+/g)) keep.add(match[0]);
   }
 
   const pathnames = new Set(all.map((b) => b.pathname));
@@ -570,8 +571,17 @@ router.delete('/trips/:id/files', requireAdmin, async (req, res, next) => {
     if (!type || !name || !['album', 'attachments'].includes(type)) {
       return res.status(400).json({ error: 'Invalid type or name' });
     }
-    // 注意：@vercel/blob 的 del() 只接受完整 URL，传 pathname 会静默失败。
-    // 因此先按 prefix 列出对象、精确匹配 pathname，再处理其 URL。
+    const key = `${type}/${req.params.id}/${safeName(name)}`;
+    const thumbKey = `album/${req.params.id}/thumb_${safeName(name)}.jpg`;
+    // s3/fs 的 del 按 key 幂等删除（404 视为成功），1 次往返即可，无需 list 定位。
+    // 注意：直删没有回收缓冲，误删不可找回——换取的是删除请求毫秒级返回。
+    if (typeof storageModule.storage().publicUrl === 'function') {
+      const refs = type === 'album' ? [key, thumbKey] : [key];
+      await del(refs);
+      return res.json({ deleted: true, count: refs.length, mode: 'direct' });
+    }
+    // Blob：公开 URL 带随机后缀无法由 key 重建，del 只收完整 URL，
+    // 只能先按 prefix 列出对象、精确匹配 pathname，再回收。
     const targets = [];
     const collect = async (pathname) => {
       try {
@@ -581,13 +591,12 @@ router.delete('/trips/:id/files', requireAdmin, async (req, res, next) => {
         }
       } catch { /* 对象可能已不存在 */ }
     };
-    await collect(`${type}/${req.params.id}/${safeName(name)}`);
+    await collect(key);
     if (type === 'album') {
-      await collect(`${type}/${req.params.id}/thumb_${safeName(name)}.jpg`);
+      await collect(thumbKey);
     }
-    // 回收而非直接删除：Blob 删除不可逆，用户误删后无法找回
     const result = await recycleBlobs(targets);
-    res.json({ recycle_path: result.recyclePath, moved_count: result.moved.length, failed_count: result.failed });
+    res.json({ deleted: true, count: result.moved.length, mode: 'recycle', recycle_path: result.recyclePath, failed_count: result.failed });
   } catch (e) { next(e); }
 });
 

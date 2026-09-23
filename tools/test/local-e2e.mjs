@@ -2,8 +2,8 @@
  * 本地模式端到端测试（真实 SQLite + 真实文件系统，独立临时目录）。
  *
  * 做法：以子进程启动 server/app.js（TRIPMAP_BACKEND=local），走真实 HTTP 完成
- * 「登录 → 草稿图上传统 → 建旅行（封面+相册+草稿插图迁移）→ 追加照片 → 删除进回收站
- *   → 清理清空回收站 → 删除旅行仅删行 → 再次清理回收孤儿媒体」全链路。
+ * 「登录 → 草稿图上传统 → 建旅行（封面+相册+草稿插图迁移）→ 追加照片 → 删除照片按 key 直删
+ *   → 清理空跑 → 删除旅行仅删行 → 再次清理回收孤儿媒体」全链路。
  *
  * 该套件是 local 实现的主要回归网；cloud 侧由部署前 Preview 冒烟覆盖（见 MERGE_PLAN §6.2）。
  */
@@ -133,12 +133,16 @@ const form = (parts) => {
   const victim = (files.album || [])[0] || {};
   res = await req('/api/trips/' + id + '/files?type=album&name=' + encodeURIComponent(victim.name || ''), { method: 'DELETE' });
   const removed = await res.json();
-  rec(res.status === 200 && String(removed.recycle_path || '').startsWith('recycle/') && removed.moved_count >= 1, '删除照片 → 进入回收站', 'moved=' + removed.moved_count);
+  rec(res.status === 200 && removed.mode === 'direct' && removed.count === 2, '删除照片 → 按 key 直删（原图+缩略图）', 'mode=' + removed.mode + ', count=' + removed.count);
+
+  res = await req('/api/trips/' + id + '/files');
+  files = await res.json();
+  rec((files.album || []).length === 1 && !arr(files.album).some((f) => f.name === victim.name), '直删后相册只剩追加的照片', 'album=' + (files.album || []).length);
 
   res = await req('/api/cleanup-media', { method: 'POST' });
   const cleaned = await res.json();
   const recycleLeft = countFiles(path.join(tmpRoot, 'media', 'recycle'));
-  rec(res.status === 200 && cleaned.purged_count >= 1 && recycleLeft === 0, '清理缓存 → 清空回收站（回收目录已空）', 'purged=' + cleaned.purged_count + ', 残留文件=' + recycleLeft);
+  rec(res.status === 200 && cleaned.purged_count === 0 && recycleLeft === 0, '直删不经回收站 → 清理空跑（回收目录为空）', 'purged=' + cleaned.purged_count + ', 残留文件=' + recycleLeft);
 
   res = await req('/api/trips/' + id, { method: 'DELETE' });
   const tripRemoved = await res.json();

@@ -465,7 +465,7 @@ async function main() {
 
   process.stdout.write('\n媒体\n');
 
-  await test('删除相册文件时回收原图与缩略图（复制到 recycle/ 后再删）', async () => {
+  await test('删除相册文件（Blob 模式）→ list 定位后回收原图与缩略图', async () => {
     const tripId = createdTripId;
     blobs.set(`album/${tripId}/photo.jpg`, { pathname: `album/${tripId}/photo.jpg`, size: 10, contentType: 'image/jpeg', uploadedAt: new Date().toISOString() });
     blobs.set(`album/${tripId}/thumb_photo.jpg.jpg`, { pathname: `album/${tripId}/thumb_photo.jpg.jpg`, size: 5, contentType: 'image/jpeg', uploadedAt: new Date().toISOString() });
@@ -477,7 +477,8 @@ async function main() {
       cookie: adminCookie
     });
     assert.equal(res.status, 200);
-    assert.equal(res.json.moved_count, 2, '原图与缩略图都应被回收');
+    assert.equal(res.json.mode, 'recycle', 'Blob 无 key 还原能力，应走 list 定位+回收分支');
+    assert.equal(res.json.count, 2, '原图与缩略图都应被回收');
     assert.ok(String(res.json.recycle_path).startsWith('recycle/'), '应返回回收目录');
     assert.equal(blobs.has(`album/${tripId}/photo.jpg`), false, '原图应从原位移除');
     assert.equal(blobs.has(`album/${tripId}/thumb_photo.jpg.jpg`), false, '缩略图应从原位移除');
