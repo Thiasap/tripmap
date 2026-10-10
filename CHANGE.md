@@ -12,6 +12,7 @@
 - **性能**：`migrateDraftImages` 并行化；S3 适配层删除改为 `DeleteObjects` 批量（单次 1000 键），
   「清理缓存」不再因逐对象串行往返而超时。
 - **文档**：细节统一进 `.agent/`，根目录三份 md 精简为人类可读版本。
+- **修复导出 PNG 封面空白**：R2 自定义域缺 CORS 响应头，html2canvas 会跳过跨域封面；已在 Cloudflare 侧补 `Access-Control-Allow-Origin: *`，并新增 `tools/check-media-cors.mjs` 用于复测。
 
 ## 2026-09-23 · 性能与删除语义重构
 
