@@ -56,7 +56,7 @@ if (!res.ok) bad('图片不可达', 'HTTP ' + res.status);
 else if (!acao) {
   bad('媒体域未返回 Access-Control-Allow-Origin');
   console.log('       → 导出 PNG 时 html2canvas 无法把跨域封面画进 canvas，封面会空白');
-  console.log('       → 修复：在媒体域上为该 Origin 补 CORS 响应头（见 .agent/SECURITY.md / CHANGE.md）');
+  console.log('       → 修复：在媒体域上为该 Origin 补 CORS 响应头（见 .agent/ARCHITECTURE.md 踩坑 #30）');
 } else {
   const allowed = acao === '*' || acao.split(',').map((s) => s.trim()).includes(origin);
   if (allowed) ok('Access-Control-Allow-Origin = ' + acao);
