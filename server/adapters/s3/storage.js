@@ -7,6 +7,7 @@
  * 需要的环境变量：`R2_ACCOUNT_ID` / `R2_BUCKET` / `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_PUBLIC_BASE_URL`
  * （可选 `R2_ENDPOINT`，默认 `https://<account-id>.r2.cloudflarestorage.com`）
  */
+const crypto = require('crypto');
 const { AwsClient } = require('aws4fetch');
 const { contentTypeOf } = require('../mime');
 
@@ -30,6 +31,11 @@ function assertKey(pathname) {
   }
   return raw;
 }
+
+/** 转义为 XML 文本实体（对象键里可能出现 & < > 等，直接拼进请求体会破坏 XML） */
+const encodeXml = (text) => String(text)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 
 /** 还原 XML 文本实体（对象键里可能出现 & < > 等） */
 const decodeXml = (text) => String(text)
@@ -83,6 +89,51 @@ function createS3Storage() {
     return assertKey(raw);
   };
 
+  /** 逐对象 DELETE：批量路径失败时的兜底，404 视为已删除（幂等） */
+  const deleteIndividually = async (keys) => {
+    for (const key of keys) {
+      const response = await client.fetch(objectUrl(key), { method: 'DELETE' });
+      if (!response.ok && response.status !== 404) await fail('del', response);
+    }
+  };
+
+  /**
+   * 批量删除（S3 DeleteObjects，单次上限 1000 键）。
+   *
+   * 为什么必须批量：逐对象 DELETE 是 N 次串行往返，R2 每次约 1s——回收站里几十个对象
+   * 就能把「清理缓存」顶到函数超时。批量把 N 次往返压成 ⌈N/1000⌉ 次。
+   */
+  const deleteObjects = async (keys) => {
+    if (!keys.length) return;
+    const body = '<?xml version="1.0" encoding="UTF-8"?><Delete>'
+      + keys.map((key) => `<Object><Key>${encodeXml(key)}</Key></Object>`).join('')
+      + '</Delete>';
+    let response;
+    try {
+      response = await client.fetch(`${endpoint}/${bucket}?delete`, {
+        method: 'POST',
+        body,
+        headers: {
+          'content-type': 'application/xml',
+          // S3 DeleteObjects 要求请求体携带 Content-MD5
+          'content-md5': crypto.createHash('md5').update(body).digest('base64')
+        }
+      });
+    } catch {
+      await deleteIndividually(keys);
+      return;
+    }
+    if (!response.ok) {
+      await deleteIndividually(keys);
+      return;
+    }
+    // 200 也可能逐键报错（权限等），把这些键退回单对象删除，保证语义与失败统计准确
+    const xml = await response.text().catch(() => '');
+    const failedKeys = [...String(xml).matchAll(/<Error>[\s\S]*?<Key>([\s\S]*?)<\/Key>[\s\S]*?<\/Error>/g)]
+      .map((match) => decodeXml(match[1]));
+    if (failedKeys.length) await deleteIndividually(failedKeys);
+  };
+
   const fail = async (action, response) => {
     const detail = await response.text().catch(() => '');
     throw new Error(`[storage] ${action} 失败：HTTP ${response.status} ${detail.slice(0, 120)}`);
@@ -128,11 +179,9 @@ function createS3Storage() {
     },
 
     async del(refs) {
-      for (const ref of Array.isArray(refs) ? refs : [refs]) {
-        if (!ref) continue;
-        const response = await client.fetch(objectUrl(toKey(ref)), { method: 'DELETE' });
-        // 404 视为已删除（幂等）
-        if (!response.ok && response.status !== 404) await fail('del', response);
+      const keys = (Array.isArray(refs) ? refs : [refs]).filter(Boolean).map(toKey);
+      for (let i = 0; i < keys.length; i += 1000) {
+        await deleteObjects(keys.slice(i, i + 1000));
       }
     },
 

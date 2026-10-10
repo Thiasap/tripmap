@@ -29,17 +29,30 @@ function readLocalConfig() {
 
 const localConfig = readLocalConfig();
 
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || localConfig.ADMIN_PASSWORD || 'admin';
-const JWT_SECRET =
-  process.env.SESSION_SECRET ||
-  localConfig.SESSION_SECRET ||
-  crypto.randomBytes(32).toString('hex');
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || localConfig.ADMIN_PASSWORD || null;
+const CONFIGURED_JWT_SECRET = process.env.SESSION_SECRET || localConfig.SESSION_SECRET || null;
+// 未配置时仍生成随机密钥：进程能起来、只读接口照常服务，但任何 JWT 都验不过（写接口自动 401）
+const JWT_SECRET = CONFIGURED_JWT_SECRET || crypto.randomBytes(32).toString('hex');
 
-if (!process.env.SESSION_SECRET && !localConfig.SESSION_SECRET) {
-  console.warn('[auth] 未配置 SESSION_SECRET，已生成临时随机密钥；实例重启后所有登录态将失效');
-}
-if (!process.env.ADMIN_PASSWORD && !localConfig.ADMIN_PASSWORD) {
-  console.warn('[auth] 未配置 ADMIN_PASSWORD，正在使用默认密码 admin；线上部署必须修改');
+/**
+ * 登录是否可用。
+ *
+ * 关键取舍：缺配置时禁止登录，而不是回退到默认口令。
+ * 此前的写法是 process.env.ADMIN_PASSWORD || ... || 'admin'——生产环境变量一旦缺失或被误删，
+ * 管理员口令就变成公开可猜的 'admin'，而代码只打一行 warn。告警只写在日志里、
+ * 行为却照常放行，等于没有防线；这里把失败方向指向拒绝：配置缺失 = 登录关闭。
+ */
+const AUTH_MISSING = [
+  ADMIN_PASSWORD ? null : 'ADMIN_PASSWORD',
+  CONFIGURED_JWT_SECRET ? null : 'SESSION_SECRET'
+].filter(Boolean);
+const AUTH_CONFIGURED = AUTH_MISSING.length === 0;
+
+if (!AUTH_CONFIGURED) {
+  console.warn(
+    '[auth] 缺少 ' + AUTH_MISSING.join(' / ') + '，登录已禁用（不再回退默认口令）。' +
+    '请在部署环境变量中配置；本地开发可写入 config.json（已被 gitignore）。'
+  );
 }
 
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
@@ -55,6 +68,7 @@ function pruneLoginAttempts(now) {
 }
 
 function passwordMatches(input) {
+  if (!ADMIN_PASSWORD) return false;
   const a = crypto.createHash('sha256').update(String(input ?? '')).digest();
   const b = crypto.createHash('sha256').update(String(ADMIN_PASSWORD)).digest();
   return crypto.timingSafeEqual(a, b);
@@ -102,6 +116,8 @@ function verifyToken(token) {
 module.exports = {
   ADMIN_PASSWORD,
   JWT_SECRET,
+  AUTH_CONFIGURED,
+  AUTH_MISSING,
   passwordMatches,
   registerFailedLogin,
   isBlocked,

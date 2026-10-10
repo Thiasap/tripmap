@@ -10,7 +10,9 @@ const {
   isBlocked,
   clearLoginAttempts,
   issueToken,
-  verifyToken
+  verifyToken,
+  AUTH_CONFIGURED,
+  AUTH_MISSING
 } = require('./auth');
 
 const app = express();
@@ -55,6 +57,10 @@ app.use('/vendor/html2canvas', express.static(path.join(rootDir, 'node_modules',
 
 // Login（带登录限速与常数时间比较）
 app.post('/api/login', (req, res) => {
+  // 凭据未配置 = 登录关闭（fail-closed）：不回退默认口令，也不进入口令比对
+  if (!AUTH_CONFIGURED) {
+    return res.status(503).json({ error: `服务器未配置 ${AUTH_MISSING.join(' / ')}，登录已禁用` });
+  }
   const ip = req.ip || 'unknown';
   if (isBlocked(ip)) {
     return res.status(429).json({ error: '尝试次数过多，请稍后再试' });

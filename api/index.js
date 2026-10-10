@@ -10,7 +10,9 @@ const {
   isBlocked,
   clearLoginAttempts,
   issueToken,
-  verifyToken
+  verifyToken,
+  AUTH_CONFIGURED,
+  AUTH_MISSING
 } = require('../server/auth');
 
 const app = express();
@@ -67,6 +69,10 @@ app.set('trust proxy', 1);
 
 // Login (JWT-based, replaces express-session)
 app.post('/api/login', (req, res) => {
+  // 凭据未配置 = 登录关闭（fail-closed）：不回退默认口令，也不进入口令比对
+  if (!AUTH_CONFIGURED) {
+    return res.status(503).json({ error: `服务器未配置 ${AUTH_MISSING.join(' / ')}，登录已禁用` });
+  }
   const ip = req.ip || req.headers['x-forwarded-for'] || 'unknown';
   if (isBlocked(ip)) {
     return res.status(429).json({ error: '尝试次数过多，请稍后再试' });

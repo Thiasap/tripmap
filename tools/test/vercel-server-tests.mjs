@@ -108,6 +108,40 @@ await test('JWT 密钥不来自硬编码默认值', () => {
   assert.equal(auth.JWT_SECRET, 'test-secret-for-unit-tests');
 });
 
+await test('凭据齐备时判定为已配置', () => {
+  assert.equal(auth.AUTH_CONFIGURED, true);
+  assert.deepEqual(auth.AUTH_MISSING, []);
+});
+
+await test('凭据缺失时判定为未配置，且不回退默认口令 admin', () => {
+  const authPath = require.resolve(path.join(projectRoot, 'server', 'auth.js'));
+  let configPath = null;
+  try { configPath = require.resolve(path.join(projectRoot, 'config.json')); } catch { configPath = null; }
+  const savedAuth = require.cache[authPath];
+  const savedConfig = configPath ? require.cache[configPath] : undefined;
+  const savedEnv = { admin: process.env.ADMIN_PASSWORD, secret: process.env.SESSION_SECRET };
+  try {
+    delete process.env.ADMIN_PASSWORD;
+    delete process.env.SESSION_SECRET;
+    // 模拟线上部署：没有 config.json，也没有环境变量
+    if (configPath) require.cache[configPath] = { id: configPath, filename: configPath, loaded: true, exports: {} };
+    delete require.cache[authPath];
+    const bare = require(authPath);
+    assert.equal(bare.AUTH_CONFIGURED, false, '缺凭据应判定为未配置（登录关闭）');
+    assert.deepEqual(bare.AUTH_MISSING, ['ADMIN_PASSWORD', 'SESSION_SECRET']);
+    assert.equal(bare.passwordMatches('admin'), false, '不得回退到公开可猜的默认口令');
+    assert.equal(bare.passwordMatches(''), false);
+  } finally {
+    if (savedEnv.admin === undefined) delete process.env.ADMIN_PASSWORD; else process.env.ADMIN_PASSWORD = savedEnv.admin;
+    if (savedEnv.secret === undefined) delete process.env.SESSION_SECRET; else process.env.SESSION_SECRET = savedEnv.secret;
+    if (configPath) {
+      if (savedConfig) require.cache[configPath] = savedConfig; else delete require.cache[configPath];
+    }
+    delete require.cache[authPath];
+    if (savedAuth) require.cache[authPath] = savedAuth;
+  }
+});
+
 process.stdout.write('server/routes.js（富文本净化与路由装载）\n');
 
 const router = require(path.join(projectRoot, 'server', 'routes.js'));

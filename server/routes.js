@@ -7,6 +7,7 @@ const storageModule = require('./adapters/storage');
 const { put, del, list, read } = storageModule.storage();
 // mediaUrl / coverRef 是模块级工具（内部按当前适配器分派），不在适配器实例上
 const { mediaUrl, coverRef } = storageModule;
+const { contentTypeOf } = require('./adapters/mime');
 const jwt = require('jsonwebtoken');
 const { sql } = require('./db');
 const { JWT_SECRET } = require('./auth');
@@ -104,6 +105,58 @@ function safeName(name) {
   return path.basename(name || 'file').replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
 }
 
+/** 400 客户端错误：全局错误处理器会把 message 原样返回给用户 */
+function badRequest(message) {
+  const error = new Error(message);
+  error.status = 400;
+  return error;
+}
+
+/**
+ * 图片类型嗅探：只看文件头魔数，不看扩展名，也不看客户端声明的 file.mimetype。
+ *
+ * 为什么必须在「写 R2 之前」做：multer 用 memoryStorage，此刻整个文件已在内存里，
+ * 所以任何一次 put 之前都能把非图片内容拦下来。此前只信 file.mimetype（客户端可伪造），
+ * 且先 put 原图、再让 sharp 解码（失败还被 catch 吞掉），等于允许把任意字节以
+ * image/* 写进公开桶——公开域上就有了可托管任意内容的位置。
+ */
+const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const IMAGE_SIGNATURES = [
+  { mime: 'image/jpeg', ext: '.jpg', match: (b) => b.length > 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { mime: 'image/png', ext: '.png', match: (b) => b.length > 8 && b.subarray(0, 8).equals(PNG_MAGIC) },
+  {
+    mime: 'image/gif',
+    ext: '.gif',
+    match: (b) => {
+      if (b.length <= 6) return false;
+      const head = b.subarray(0, 6).toString('latin1');
+      return head === 'GIF87a' || head === 'GIF89a';
+    }
+  },
+  {
+    mime: 'image/webp',
+    ext: '.webp',
+    match: (b) => b.length > 12 &&
+      b.subarray(0, 4).toString('latin1') === 'RIFF' &&
+      b.subarray(8, 12).toString('latin1') === 'WEBP'
+  }
+];
+
+/** @returns {{mime: string, ext: string} | null} 未命中任何图片魔数时返回 null */
+function detectImageType(buffer) {
+  const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || []);
+  return IMAGE_SIGNATURES.find((signature) => signature.match(bytes)) || null;
+}
+
+/** 校验为真实图片，否则抛 400（调用方保证在写存储之前执行） */
+function requireImage(file, label) {
+  const detected = detectImageType(file.buffer);
+  if (!detected) {
+    throw badRequest(`${label}不是有效的图片文件: ${safeName(file.originalname)}`);
+  }
+  return detected;
+}
+
 function normalizeTrip(row) {
   if (!row) return null;
   let coverMeta = null;
@@ -134,12 +187,29 @@ async function processImageBuffer(buffer, options = {}) {
   return image.jpeg({ quality: options.quality || 82, mozjpeg: true }).toBuffer();
 }
 
+/** 随机对象名：扩展名由服务端嗅探结果决定，不采用客户端文件名里的后缀 */
+function randomKey(ext) {
+  return `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+}
+
 async function saveUploads(id, files = {}) {
+  const cover = files.cover?.[0] || null;
+  const album = files.album || [];
+  const attachments = files.attachments || [];
+  const richTextImages = files.richtextImages || [];
+
+  // ── 第一段：先把全部上传内容校验完，此时一个对象都还没写进存储 ──────────────
+  // 顺序很重要：校验通过才进入第二段的上传，避免「先写进公开桶、再发现不是图片」。
+  if (cover) requireImage(cover, '封面');
+  const albumTypes = album.map((file) => requireImage(file, '相册照片'));
+  const richTextTypes = richTextImages.map((file) => requireImage(file, '富文本插图'));
+
+  // ── 第二段：校验通过，开始写存储 ──────────────────────────────────────────
   let coverPath = null;
   let coverMeta = null;
 
-  if (files.cover?.[0]) {
-    const processed = await processImageBuffer(files.cover[0].buffer, {
+  if (cover) {
+    const processed = await processImageBuffer(cover.buffer, {
       resize: { width: 1400, withoutEnlargement: true },
       quality: 78
     });
@@ -155,13 +225,11 @@ async function saveUploads(id, files = {}) {
   }
 
   // 每张图的「原图 + 缩略图」互不依赖，并行上传：云端存储逐次往返延迟高，串行会把上传拖成 N×RTT
-  await Promise.all((files.album || []).map(async (file) => {
-    const ext = path.extname(file.originalname) || '.jpg';
-    const name = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
-    const key = safeName(name);
+  await Promise.all(album.map(async (file, index) => {
+    const key = randomKey(albumTypes[index].ext);
     await put(`album/${id}/${key}`, file.buffer, {
       access: 'public',
-      contentType: file.mimetype
+      contentType: albumTypes[index].mime
     });
     try {
       const thumb = await processImageBuffer(file.buffer, {
@@ -175,12 +243,19 @@ async function saveUploads(id, files = {}) {
     } catch { /* thumbnail generation best-effort */ }
   }));
 
-  const putPlain = (prefix, file) => put(`${prefix}/${id}/${Date.now()}_${safeName(file.originalname)}`, file.buffer, {
-    access: 'public',
-    contentType: file.mimetype
-  });
-  await Promise.all((files.attachments || []).map((file) => putPlain('attachments', file)));
-  await Promise.all((files.richtextImages || []).map((file) => putPlain('richtext_images', file)));
+  // 附件：扩展名白名单已由 fileFilter 把关，Content-Type 一律由服务端按扩展名映射，
+  // 不采用客户端声明的 file.mimetype（否则可上传 .txt 却声明 text/html，在公开域托管网页）
+  await Promise.all(attachments.map((file) => put(
+    `attachments/${id}/${randomKey(path.extname(file.originalname).toLowerCase())}`,
+    file.buffer,
+    { access: 'public', contentType: contentTypeOf(file.originalname) }
+  )));
+
+  await Promise.all(richTextImages.map((file, index) => put(
+    `richtext_images/${id}/${randomKey(richTextTypes[index].ext)}`,
+    file.buffer,
+    { access: 'public', contentType: richTextTypes[index].mime }
+  )));
 
   return { cover_path: coverPath, cover_meta: coverMeta };
 }
@@ -215,7 +290,10 @@ async function fileList(prefix) {
  *
  * @returns {{ recyclePath: string, moved: Array<{from: string, to: string}>, failed: number }}
  */
-async function recycleBlobs(blobs, { concurrency = 4 } = {}) {
+/** 回收并发度：云端每对象一次 copy，串行会把「删旅行」拖成 N×RTT */
+const RECYCLE_CONCURRENCY = Math.max(1, Number(process.env.RECYCLE_CONCURRENCY) || 6);
+
+async function recycleBlobs(blobs, { concurrency = RECYCLE_CONCURRENCY } = {}) {
   const targets = (blobs || []).filter((b) => b && b.url && b.pathname);
   const stamp = timestampName();
   if (!targets.length) return { recyclePath: '', moved: [], failed: 0 };
@@ -303,7 +381,8 @@ async function purgeRecycle() {
   let purged = 0;
   let failed = 0;
 
-  const CHUNK = 100;
+  // S3 DeleteObjects 单次上限 1000 键；适配层已按批实现，这里按上限切块即可
+  const CHUNK = 1000;
   for (let i = 0; i < urls.length; i += CHUNK) {
     const chunk = urls.slice(i, i + CHUNK);
     try {
@@ -498,17 +577,28 @@ async function migrateDraftImages(tripId, html) {
   }
   if (!draftBlobs.length) return result;
 
-  const urlsToDelete = [];
-  for (const blob of draftBlobs) {
-    if (!blob.url || !result.includes(blob.url)) continue;
-    const name = blob.pathname.slice(draftPrefix.length);
-    if (!name) continue;
+  // 逐张串行会让「插图多的卡片」被 N×RTT 拖慢（云端每次往返约 1s），
+  // 因此先并行完成 copy，再在内存里改写 URL（改写是纯字符串操作，必须串行保证顺序无歧义）。
+  const pending = draftBlobs
+    .filter((blob) => blob.url && result.includes(blob.url) && blob.pathname.slice(draftPrefix.length))
+    .map((blob) => ({ blob, name: blob.pathname.slice(draftPrefix.length) }));
+
+  const moved = await Promise.all(pending.map(async ({ blob, name }) => {
     try {
       const { body, contentType } = await read(blob);
       const uploaded = await put(`richtext_images/${tripId}/${name}`, body, { contentType });
-      result = result.split(blob.url).join(uploaded.url);
-      urlsToDelete.push(blob.url);
-    } catch { /* 保留原 URL，避免图片链接失效 */ }
+      return { from: blob.url, to: uploaded.url };
+    } catch {
+      // 单张失败保留原 URL，宁可留下孤儿也不让图片链接失效
+      return null;
+    }
+  }));
+
+  const urlsToDelete = [];
+  for (const item of moved) {
+    if (!item) continue;
+    result = result.split(item.from).join(item.to);
+    urlsToDelete.push(item.from);
   }
 
   if (urlsToDelete.length) {
@@ -629,9 +719,11 @@ router.post('/trips/:id/files', requireAdmin, upload.fields([
 router.post('/uploads/richtext', requireAdmin, upload.single('image'), async (req, res, next) => {
   try {
     const id = req.body.id || 'draft';
-    const blob = await put(`richtext_images/${safeName(id)}/${Date.now()}_${safeName(req.file.originalname)}`, req.file.buffer, {
+    // 与 saveUploads 同一道闸：先按魔数确认是真实图片，再写存储
+    const detected = requireImage(req.file, '富文本插图');
+    const blob = await put(`richtext_images/${safeName(id)}/${randomKey(detected.ext)}`, req.file.buffer, {
       access: 'public',
-      contentType: req.file.mimetype
+      contentType: detected.mime
     });
     res.json({ url: blob.url });
   } catch (e) { next(e); }

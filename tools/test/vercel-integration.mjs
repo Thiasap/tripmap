@@ -741,6 +741,51 @@ async function main() {
     assert.equal(res.status, 201, `附件上传应成功，实际 ${res.status} ${res.text?.slice(0, 120)}`);
   });
 
+  await test('伪造图片后缀与 MIME 的任意字节被后端拦下（不写入存储）', async () => {
+    const before = blobs.size;
+    const form = multipart([
+      { name: 'album', filename: 'fake.png', contentType: 'image/png', data: Buffer.from('<html><script>alert(1)</script></html>') }
+    ]);
+    const res = await request('POST', '/api/trips', {
+      cookie: adminCookie,
+      raw: form.raw,
+      contentType: form.contentType
+    });
+    assert.equal(res.status, 400, '非图片内容应返回 400，实际 ' + res.status);
+    assert.ok(String(res.json?.error || '').includes('不是有效的图片文件'), '应说明是图片校验失败');
+    assert.equal(blobs.size, before, '校验未通过时一个对象都不应写进存储');
+  });
+
+  await test('封面同样先校验后写入（假 PNG 不落存储）', async () => {
+    const before = blobs.size;
+    const form = multipart([
+      { name: 'cover', filename: 'cover.png', contentType: 'image/png', data: Buffer.from('not-a-png') }
+    ]);
+    const res = await request('POST', '/api/trips', {
+      cookie: adminCookie,
+      raw: form.raw,
+      contentType: form.contentType
+    });
+    assert.equal(res.status, 400);
+    assert.equal(blobs.size, before, '封面校验失败时不应写入任何对象');
+  });
+
+  await test('附件 Content-Type 由服务端按扩展名决定，不采信客户端声明', async () => {
+    const form = multipart([
+      { name: 'attachments', filename: 'note.txt', contentType: 'text/html', data: Buffer.from('hello') }
+    ]);
+    const res = await request('POST', '/api/trips', {
+      cookie: adminCookie,
+      raw: form.raw,
+      contentType: form.contentType
+    });
+    assert.equal(res.status, 201, '附件上传应成功，实际 ' + res.status);
+    const id = res.json.id;
+    const stored = [...blobs.values()].find((b) => b.pathname.startsWith('attachments/' + id + '/'));
+    assert.ok(stored, '应存在该旅行的附件对象');
+    assert.equal(stored.contentType, 'text/plain', '应按扩展名映射为 text/plain，而不是客户端声明的 text/html');
+  });
+
   process.stdout.write('\n错误处理\n');
 
   await test('服务端错误不泄露内部细节', async () => {

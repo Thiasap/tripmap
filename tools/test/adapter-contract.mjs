@@ -327,17 +327,40 @@ await test('s3·list：解析 ListObjectsV2 XML 并返回续页 token', async ()
   equal(page.cursor, 'TOKEN2', '截断时应返回续页 token');
 });
 
-await test('s3·del：按公开 URL / pathname 删除，404 视为已删除', async () => {
+await test('s3·del：合并为一次 DeleteObjects 批量请求（不再逐对象往返）', async () => {
   s3Calls.length = 0;
-  s3Responder = () => new Response(null, { status: 204 });
+  s3Responder = () => new Response('', { status: 200 });
   await s3.del(['https://pub-test.r2.dev/album/t1/a.jpg', 'album/t1/thumb_a.jpg.jpg']);
-  const deletes = s3Calls.filter((item) => item.kind === 'fetch');
-  equal(deletes.length, 2, '应发两次 DELETE');
-  assert(deletes.every((item) => item.method === 'DELETE'), '应使用 DELETE');
-  equal(deletes[0].url, 'https://acct123.r2.cloudflarestorage.com/tripmap-media/album/t1/a.jpg', '应从公开 URL 还原对象键');
+  const calls = s3Calls.filter((item) => item.kind === 'fetch');
+  equal(calls.length, 1, '两个键应合并为一次批量删除请求');
+  equal(calls[0].method, 'POST', 'DeleteObjects 使用 POST');
+  equal(calls[0].url, 'https://acct123.r2.cloudflarestorage.com/tripmap-media?delete', '应打到桶根 ?delete');
+  assert(String(calls[0].body).includes('<Key>album/t1/a.jpg</Key>'), '应从公开 URL 还原对象键并写入 XML');
+  assert(String(calls[0].body).includes('<Key>album/t1/thumb_a.jpg.jpg</Key>'), '第二个键也应写入 XML');
+  assert(calls[0].headers['content-md5'], 'DeleteObjects 请求体应带 Content-MD5');
+});
 
+await test('s3·del：批量失败时退化为逐对象 DELETE，404 视为已删除（幂等）', async () => {
+  s3Calls.length = 0;
   s3Responder = () => new Response('not found', { status: 404 });
   await s3.del(['album/t1/gone.jpg']);
+  const calls = s3Calls.filter((item) => item.kind === 'fetch');
+  assert(calls.some((item) => item.method === 'POST'), '应先尝试批量');
+  assert(calls.some((item) => item.method === 'DELETE'), '批量失败应退化为单对象 DELETE');
+});
+
+await test('s3·del：200 响应里逐键报错的对象会被退回单对象删除', async () => {
+  s3Calls.length = 0;
+  s3Responder = (url, options = {}) => {
+    if (options.method === 'POST') {
+      return new Response('<DeleteResult><Error><Key>album/t1/bad.jpg</Key><Code>AccessDenied</Code></Error></DeleteResult>', { status: 200 });
+    }
+    return new Response(null, { status: 204 });
+  };
+  await s3.del(['album/t1/ok.jpg', 'album/t1/bad.jpg']);
+  const deletes = s3Calls.filter((item) => item.kind === 'fetch' && item.method === 'DELETE');
+  equal(deletes.length, 1, '只应重试失败的那个键');
+  assert(deletes[0].url.endsWith('/album/t1/bad.jpg'), '重试目标应是报错的键');
 });
 
 await test('s3·read：返回 Buffer 与 contentType', async () => {

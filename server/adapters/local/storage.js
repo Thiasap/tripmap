@@ -96,14 +96,17 @@ function createLocalStorage() {
     },
 
     async del(refs) {
-      for (const ref of Array.isArray(refs) ? refs : [refs]) {
-        if (!ref) continue;
-        const target = safeResolve(mediaRoot, toPathname(ref));
+      // 先同步解析全部路径（非法路径立刻抛错），再并行 unlink：
+      // 清理任务一次可能删几百个对象，串行 unlink 在大目录下同样会被拖慢
+      const targets = (Array.isArray(refs) ? refs : [refs])
+        .filter(Boolean)
+        .map((ref) => safeResolve(mediaRoot, toPathname(ref)));
+      await Promise.all(targets.map(async (target) => {
         try { await fsp.unlink(target); } catch (error) {
-          if (error && error.code === 'ENOENT') continue; // 已不存在视为删除成功（幂等）
+          if (error && error.code === 'ENOENT') return; // 已不存在视为删除成功（幂等）
           throw error;
         }
-      }
+      }));
     },
 
     async read(ref) {

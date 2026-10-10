@@ -1,7 +1,9 @@
 # 不随部署上传的内容
 # 说明：提交到 Git 的文件仍会部署；此文件用于排除「本地存在但不应上线」的文件。
-# 最关键的是 config.json——它含管理员密码与 JWT 密钥，一旦上传就会随部署产物留存。
+# 关键两类：① 凭据与个人数据（config.json / .agent / backups / media / sqlite）；
+#          ② 运行时用不到的文件（文档、开发工具、迁移脚本）——减少部署产物的信息面。
 
+# 凭据（含管理员密码与 JWT 密钥，一旦上传就会随部署产物留存）
 config.json
 config.json.example
 
@@ -22,5 +24,11 @@ tripmap.sqlite
 tripmap.sqlite-shm
 tripmap.sqlite-wal
 
-# 测试与工具（线上运行不需要）
-tools/test/
+# 文档：运行时不需要（部署产物里不留运维与架构说明）
+*.md
+
+# 开发工具与迁移脚本：运行时不需要
+# 注意：scripts/copy-vendor.js 是 vercel-build 脚本，必须保留，不能整目录排除 scripts/
+tools/
+scripts/migrate-to-blob.js
+scripts/migrate-to-postgres.js

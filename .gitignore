@@ -28,6 +28,9 @@ media_recycle*/
 # 构建生成：vercel-build 会把前端库从 node_modules 拷到这里，不纳入版本控制
 /public/vendor/
 
+# 临时工作文件（会话记录等，不进仓库）
+session.txt
+
 # 备份产物（本地/离线，禁止提交）
 /backups/
 
