@@ -1,257 +1,43 @@
-# 旅行地图
+# 旅行地图（Tripmap）
 
-本地单用户旅行记录 Web 应用。基于中国地图，以浮动卡片形式展示旅行记录，支持富文本编辑、相册管理、人员标签、地图导出、游客/管理员鉴权等功能。
+本地单用户旅行记录 Web 应用：基于中国地图，以浮动卡片展示旅行记录，支持富文本编辑、相册管理、人员标签、地图导出、游客/管理员鉴权。本项目由 AI 生成（GPT-5.5 + DeepseekV4Pro），并由 AI Agent 持续迭代维护。
 
-本项目由AI生成（GPT-5.5 +DeepseekV4Pro）
+## 当前版本（2026-10）
 
-## 技术栈
+**单代码库 · 双后端**：一份代码同时支撑云上生产与本地开发。
 
-| 层级     | 技术                                       |
-| -------- | ------------------------------------------ |
-| 运行环境 | Node.js ≥ 22.5（使用内置 node:sqlite）    |
-| 后端     | Node.js + Express                          |
-| 数据库   | SQLite（node:sqlite，WAL 模式）            |
-| 地图     | D3.js + GeoJSON（`d3.geoIdentity` 投影） |
-| 富文本   | Quill 2.x                                  |
-| 图片处理 | Sharp（旋转校正、缩略图、压缩）            |
-| 图片预览 | GLightbox                                  |
-| 导出     | html2canvas                                |
-| 安全     | express-session + helmet + sanitize-html   |
+| 组件 | 生产（默认） | 本地 |
+| --- | --- | --- |
+| 运行 | Vercel 函数（`api/index.js`，`vercel.json` 全量重写） | `node server/app.js` |
+| 数据库 | Neon PostgreSQL（`@neondatabase/serverless`） | SQLite（`node:sqlite`，WAL） |
+| 媒体存储 | Cloudflare R2（S3 兼容，自定义域名直读） | 本地 `media/` 目录 |
+| 鉴权 | JWT Cookie（`jsonwebtoken`，无状态） | 同实现 |
 
-## 目录结构
+- 线上地址：`https://tripmap.thiasap.cn`（手动别名——部署后必须 `vercel alias set` 切换）
+- 模式开关：`TRIPMAP_BACKEND=cloud|local` × `TRIPMAP_STORAGE=blob|s3|fs`，默认 `cloud+s3`
+- DB 只存媒体**相对 key**（如 `album/<id>/cover_x.jpg`），URL 由服务端 `mediaUrl()` 按存储后端现场解析——换域名/换存储只改环境变量，无需改库
+- 删除语义：删卡片 = 仅删 DB 行（毫秒级返回），媒体成为孤儿由「清理缓存」任务延迟回收（1 小时宽限防误收）；卡片内删单张照片 = 按 key 直删（无回收缓冲）
+- 测试：`pnpm test` 共 102 项（契约 22 + 工具 20 + 服务端 11 + 集成 36 + 本地 e2e 13），全部本地运行，不接触云端
 
-```
-media/                       # 上传文件（gitignore）
-  album/<tripId>/             # 封面与相册
-  attachments/<tripId>/       # 附件
-  richtext_images/<tripId>/   # 富文本图片
-public/
-  index.html                  # 主页面
-  login.html                  # 管理员登录页
-  settings.html               # 设置页面
-  common.js                   # 共享工具（escapeHtml 等）
-  main.js                     # 主页面逻辑
-  settings.js                 # 设置页面逻辑
-  login.js                    # 登录页逻辑
-  style.css                   # 样式
-  china_provinces.geojson     # 中国地图 GeoJSON 数据
-server/
-  app.js                      # Express 入口（中间件、鉴权、错误处理）
-  db.js                       # 数据库初始化（含参数化查询封装）
-  routes.js                   # API 路由（CRUD、文件上传、安全校验）
-config.json                   # 本地配置文件（gitignore，含密码和 Session 密钥）
-regions_L1_L2.json            # 省市数据
-package.json
-```
-
-## 安装与启动
+## 快速开始（本地开发）
 
 ```bash
 pnpm install
-node server/app.js
+TRIPMAP_BACKEND=local TRIPMAP_LOCAL_ROOT=<仓库根> node server/app.js
 ```
 
-访问 `http://localhost:3002`，设置页 `http://localhost:3002/settings.html`。
+访问 `http://localhost:3002`。本地实例直接读写仓库根的 `tripmap.sqlite` 与 `media/`，可随便写、零生产影响；登录密码见 `config.json`（已 gitignore）。
 
-## 配置
+> ⚠️ 不设 `TRIPMAP_BACKEND` 时默认 cloud = **直连生产 Neon + R2**，只允许只读操作。
 
-项目根目录下 `config.json`（首次运行自动创建默认值）：
+## 文档索引
 
-```json
-{
-  "ADMIN_PASSWORD": "admin",
-  "SESSION_SECRET": "<随机字符串>"
-}
-```
+| 文档 | 内容 |
+| --- | --- |
+| `CHANGE.md` | 版本更新记录与踩坑沉淀 |
+| `AGENT.md` | 开发思路、硬约束与后续方向（供 Agent 后续开发参考） |
+| `.agent/`（本机目录，不进 Git） | 交接总纲、凭据状态、回滚映射 |
 
-修改密码后重启服务生效。环境变量优先级高于 `config.json`：
+## 沿革（一句话）
 
-| 环境变量         | 默认值     | 说明                                                     |
-| ---------------- | ---------- | -------------------------------------------------------- |
-| `ADMIN_PASSWORD` | `admin`    | 管理员密码（默认值仅作本地首次启动引导，对外部署前必改） |
-| `SESSION_SECRET` | 随机       | Session 密钥，公网部署应固定为随机长串                   |
-| `HOST`           | `127.0.0.1` | 监听地址，公网部署设 `0.0.0.0`（推荐仍由本机反代转发）   |
-| `COOKIE_SECURE`  | `false`    | HTTPS 部署时设 `true` 开启 Secure Cookie                 |
-| `TRUST_PROXY`    | —          | 反向代理之后设为代理跳数（如 `1`），限速按真实 IP 计数   |
-
-## 公网部署
-
-应用默认按「本地单人使用」设计（监听 127.0.0.1、HTTP Cookie、内存 Session）。部署到互联网前请逐项确认：
-
-1. **修改密码**：`ADMIN_PASSWORD` 使用强密码，禁止保留默认值
-2. **固定 Session 密钥**：设置 `SESSION_SECRET` 环境变量，否则重启后所有登录态失效
-3. **HTTPS**：前置 Nginx/Caddy 等反向代理提供 TLS，并设置 `COOKIE_SECURE=true`
-4. **监听地址**：推荐保持默认 `127.0.0.1`，由同机反代对外转发；若需直连则 `HOST=0.0.0.0`
-5. **反向代理**：设置 `TRUST_PROXY=1`，登录限速才能按真实客户端 IP 计数
-6. **会话存储**：单用户场景 MemoryStore 足够；多用户/长期运行建议换持久化 store（如 connect-sqlite3）
-7. **备份**：`tripmap.sqlite*` 与 `media/` 纳入备份计划；`media_recycle/` 为删除缓冲区，可定期人工清理
-
-各项设计的原因见 `server/app.js` 头部「安全设计说明」注释。
-
-## 鉴权
-
-| 角色                      | 权限                                                    |
-| ------------------------- | ------------------------------------------------------- |
-| **guest**（游客）   | 浏览地图、查看卡片、缩放/拖拽卡片（仅本地缓存，不写库） |
-| **admin**（管理员） | 全部权限：增删改旅行、上传文件、修改设置、管理人员      |
-
-- 游客访问设置页自动重定向到登录页
-- 游客模式下首页隐藏"添加"按钮、详情页隐藏"编辑"/"删除"按钮
-- 后端所有写 API 默认要求 `requireAdmin`，未登录返回 401
-- Session 基于 `express-session` + httpOnly Cookie + `sameSite: lax`
-- 登录时重新生成 Session ID（防 Session Fixation），登出时服务端销毁 Session
-- 登录限速：同一来源 15 分钟窗口内失败 10 次后锁定，密码比较经哈希后常数时间执行
-
-## 功能
-
-### 地图与卡片
-
-- 中国地图展示，省份按行政区划编码稳定着色
-- 滚轮缩放、拖动平移地图
-- 卡片浮动于地图上方，图钉与卡片间连线
-- 卡片可独立拖拽，位置以地理坐标（经纬度）持久化，跨分辨率/跨窗口大小一致
-- 卡片大小随视口等比缩放（`transform: scale`），图片、文字、圆角同步缩放
-- 卡片封面支持横竖版自适应宽高比
-- 首页顶部"卡片缩放"滑块实时调节卡片整体大小
-- 窗口尺寸变化**不再整页刷新**：只重排地图投影与卡片位置，编辑中弹窗里未保存的内容不会丢失；纯高度变化（软键盘、地址栏收起）不触发重排
-- 移动端 = **PC 版式的整体等比缩放**：`viewport width=1280` 让手机按桌面宽度渲染、浏览器统一缩放适配，卡片/地图/顶栏/弹窗与 PC 逐像素同构（明确不做单独的移动端布局，卡片与地图的相对位置在任何设备上一致）
-
-### 旅行编辑
-
-- 添加 / 编辑 / 删除旅行记录
-- 省份、城市使用 `<datalist>` 下拉建议（来自 `regions_L1_L2.json`），同时支持手动输入
-- 经纬度支持手动输入、地图点选（点击地图反算地理坐标）、以及逗号分隔字符串自动识别经纬
-- Quill 富文本编辑器，支持插图、标题、列表、链接
-- 后端对富文本内容进行 `sanitize-html` 净化，移除 `<script>` 等危险标签
-- 封面上传与预览（自动生成缩略图）
-- 相册批量上传（自动生成缩略图）、附件上传
-- 编辑模式下删除照片/附件：标记待删除，保存时执行，关闭则撤销
-- 新建时支持预上传文件，带删除按钮
-
-### 人员标签
-
-- Bilibili 风格标签选择器：输入框 + 下拉列表 + 已选标签
-- 下拉按参与次数降序，实时模糊搜索
-- 回车匹配库中人员或新增，点击标签移除
-- 保存旅行时调用 `POST /api/participants/batch` 批量记录参与，仅对本次新增的人员 +1 次（重复保存不虚增次数）
-- 设置页人员管理：搜索、分页（5/10/15）、添加、删除
-
-### 设置页
-
-| 设置项       | 范围                  | 默认值 | 说明                                             |
-| ------------ | --------------------- | ------ | ------------------------------------------------ |
-| 卡片最大宽度 | 0–800 px             | 360    | 卡片像素宽度上限                                 |
-| 卡片标题字体 | 0–40 px              | 16     | 卡片标题字号                                     |
-| 卡片小字体   | 0–32 px              | 13     | 日期等元信息字号                                 |
-| 地图拉伸     | 0.5–2                | 1      | 地图 Y 轴拉伸系数，值越大地图越高                |
-| 图钉大小     | 2–30 px              | 7      | 地图上图钉的半径                                 |
-| 默认缩放     | 0.3–5                | 1      | 打开页面时的初始地图缩放级别                     |
-| 卡片缩放     | 10%–100%（首页滑块） | 100%   | 卡片等比缩放，游客模式本地缓存                   |
-| 清理缓存     | —                    | —     | 移动孤立媒体文件至 `media_recycle/` 时间戳目录（覆盖相册/富文本/附件；未保存的草稿图有 24 小时宽限期） |
-| 人员管理     | —                    | —     | 搜索、分页、增删参与人员                         |
-
-### 导出
-
-- 首页顶栏"导出"按钮，支持 PNG / JPEG 格式
-- 像素密度可选 1x–4x，2x 推荐（文字清晰）
-- 基于 html2canvas 截取整个地图区域（含地图、图钉、连线、卡片）
-
-### 游客本地缓存
-
-游客模式下卡片拖拽位置和缩放比例自动缓存到 `localStorage`，刷新页面后恢复。首页"重置"按钮（仅游客可见）可清空本地缓存。
-
-## API
-
-| 方法   | 路径                                 | 鉴权  | 说明                            |
-| ------ | ------------------------------------ | ----- | ------------------------------- |
-| GET    | `/api/trips`                       | —    | 获取所有旅行                    |
-| POST   | `/api/trips`                       | admin | 创建旅行（含文件上传）          |
-| PUT    | `/api/trips/:id`                   | admin | 更新旅行（部分字段可选）        |
-| DELETE | `/api/trips/:id`                   | admin | 删除旅行（媒体文件移入回收站）  |
-| GET    | `/api/trips/:id/files`             | —    | 获取旅行的相册/附件列表         |
-| POST   | `/api/trips/:id/files`             | admin | 追加相册/附件                   |
-| DELETE | `/api/trips/:id/files?type=&name=` | admin | 删除单个相册/附件               |
-| GET    | `/api/regions`                     | —    | 获取省市数据                    |
-| GET    | `/api/settings`                    | —    | 获取所有设置项                  |
-| PUT    | `/api/settings`                    | admin | 更新设置（参数校验 + 范围钳制） |
-| POST   | `/api/cleanup-media`               | admin | 清理孤立媒体文件                |
-| GET    | `/api/participants`                | —    | 获取人员列表                    |
-| POST   | `/api/participants`                | admin | 添加人员                        |
-| PUT    | `/api/participants/:id`            | admin | 更新人员                        |
-| DELETE | `/api/participants/:id`            | admin | 删除人员                        |
-| POST   | `/api/participants/batch`          | admin | 批量记录参与（UPSERT）          |
-| POST   | `/api/uploads/richtext`            | admin | 上传富文本图片                  |
-| POST   | `/api/login`                       | —    | 管理员登录                      |
-| POST   | `/api/logout`                      | —    | 登出（销毁 Session）            |
-| GET    | `/api/auth/status`                 | —    | 获取当前鉴权角色                |
-
-## 数据库
-
-三张表，使用 WAL 模式：
-
-**trips** — 旅行记录
-
-| 字段             | 类型    | 说明                                 |
-| ---------------- | ------- | ------------------------------------ |
-| id               | TEXT PK | 基于省市哈希 + 随机字符生成          |
-| name             | TEXT    | 旅行名称                             |
-| province         | TEXT    | 省份                                 |
-| city             | TEXT    | 城市                                 |
-| address_detail   | TEXT    | 详细地址                             |
-| latitude         | REAL    | 纬度（4 位小数）                     |
-| longitude        | REAL    | 经度（4 位小数）                     |
-| start_date       | TEXT    | 开始日期                             |
-| end_date         | TEXT    | 结束日期                             |
-| participants     | TEXT    | 参与人员（逗号分隔）                 |
-| rich_text_path   | TEXT    | 富文本 HTML（经 sanitize-html 净化） |
-| album_path       | TEXT    | 相册目录路径                         |
-| attachments_path | TEXT    | 附件目录路径                         |
-| cover_path       | TEXT    | 封面图片路径                         |
-| cover_meta       | TEXT    | 封面宽高 JSON                        |
-| card_position_x  | REAL    | 卡片地理经度（跨分辨率一致）         |
-| card_position_y  | REAL    | 卡片地理纬度                         |
-| created_at       | TEXT    | 创建时间 ISO                         |
-| updated_at       | TEXT    | 更新时间 ISO                         |
-
-**settings** — 键值对配置
-
-| 字段  | 类型    | 说明   |
-| ----- | ------- | ------ |
-| key   | TEXT PK | 配置键 |
-| value | TEXT    | 配置值 |
-
-**participants** — 人员
-
-| 字段                 | 类型        | 说明                  |
-| -------------------- | ----------- | --------------------- |
-| id                   | INTEGER PK  | 自增                  |
-| name                 | TEXT UNIQUE | 姓名                  |
-| last_participated_at | TEXT        | 最近参与时间 ISO      |
-| count                | INTEGER     | 参与次数（default 0） |
-
-## 安全措施
-
-- 所有 SQL 使用参数化查询（`@name` → `$name` 转换），无字符串拼接
-- 所有写 API 需 admin 登录（`requireAdmin` 中间件）
-- 用户输入（卡片名称、人员姓名等）前端 `escapeHtml()` 转义
-- 富文本后端 `sanitize-html` 净化，移除 script/onerror 等，并禁用协议相对 URL（`//evil.com/x.png`）
-- Helmet CSP：禁止外部脚本与远程资源（允许 inline 样式，Quill/GLightbox 需要）
-- 文件上传：扩展名白名单（`.jpg/.png/.webp/.gif/.pdf/.mp4/.mov/.txt`）+ MIME 校验
-- 文件名 `safeName()` 过滤路径穿越字符
-- Multer 限制：`fileSize: 200MB`，`fieldSize: 100KB`
-- Session：httpOnly + sameSite: lax + 登录重新生成 ID + 登出服务端销毁
-- 登录限速 + 常数时间密码比较；服务默认仅监听 `127.0.0.1`（可用环境变量 `HOST` 覆盖）
-- 错误响应统一返回 JSON：客户端错误返回原因，服务端错误不泄露内部细节
-- 配置文件 `config.json` 位于 `public/` 外，不可通过 HTTP 访问
-
-## 说明
-
-- 服务端口固定 3002，默认仅监听本机回环地址（局域网无法访问）
-- 本地单用户使用
-- 媒体文件删除/清理均移至 `media_recycle/` 时间戳目录，不直接物理删除
-- 云端媒体存储于 Cloudflare R2（自定义域名直读），数据库只存**相对 key**（如 `album/<tripId>/cover_x.jpg`），URL 由服务端按 `TRIPMAP_STORAGE` 现场解析——换域名/换存储只需改环境变量，无需改库
-- 2026-09-18 完成 Vercel Blob → R2 迁移并切生产：先复制校验（645 对象）再切换，回滚映射留档，Blob 对象未删可随时回退
-- 新建旅行时富文本图片先存于 `richtext_images/draft/`，保存时自动迁移到旅行目录并改写 URL
-- 省市数据来源 [regions-data](https://github.com/slightlee/regions-data)
-- 使用 pnpm 管理依赖，`pnpm install` 安装
-- 2026-09-18 完成 resize 不刷新改造（原地重排替代 `location.reload()`，编辑中的内容不再丢失）；移动端定为「PC 版式整体等比缩放」（`viewport width=1280`，渲染管线零改动）。曾试做窄屏紧凑布局（卡片改文档流列表），按用户要求已完整移除，桌面端经实测与历史版本逐像素一致（方案文档执行完即删，不留在 `.agent/`）
+初代为本地 SQLite 单机版（`master` 分支，已冻结留档）；2026-09 经适配层改造合并为单代码库（`vercel` 分支，唯一开发分支），媒体存储由 Vercel Blob 迁至 Cloudflare R2，2026-09-23 完成性能与删除语义重构。详见 `CHANGE.md`。
